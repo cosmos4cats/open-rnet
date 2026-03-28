@@ -543,7 +543,7 @@ python3 rnet_self_program.py restore factory_settings.bin
 | [Device Catalog](RNET_DEVICE_CATALOG.md) | All R-Net device types and 100+ parameters |
 | [Programmer Protocol](RNET_PROGRAMMER_PROTOCOL.md) | Programmer handshake and read/write details |
 | [Protocol Specification](RNET_PROTOCOL_SPECIFICATION.md) | Full R-Net protocol spec |
-| [Frame Dictionary](../RNET_FRAME_DICTIONARY.md) | 590+ CAN frame reference |
+| [Frame Dictionary](../reference/RNET_FRAME_DICTIONARY.md) | 590+ CAN frame reference |
 | [Config File Format](RNET_CONFIG_FILE_FORMAT.md) | .R-net binary file format |
 
 ---

@@ -30,6 +30,7 @@ Thumbs.db
 # Binaries and media (not tracked)
 *.bin
 *.pdf
+!docs/presentations/*.pdf
 *.jpg
 *.jpeg
 *.png

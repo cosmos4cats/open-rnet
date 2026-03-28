@@ -128,7 +128,7 @@ R-Net uses CAN 2.0B at 125Kbps. Frame ID represents priority (lowest wins).
 - `1F[seq][slot][key][val]#` - Serial number challenge/response (see algorithm below)
 - `1fb0000X#` - Device enumeration (full 8-byte serial for slot X)
 
-See `RNET_FRAME_DICTIONARY.md` for comprehensive frame reference (compiled from all research).
+See `reference/RNET_FRAME_DICTIONARY.md` for comprehensive frame reference (compiled from all research).
 
 ## Control Override Methods
 
@@ -827,6 +827,6 @@ See `tools/README.md` for complete tool documentation.
   - `speed_profiles_comparison.csv` - All speed profile settings
   - Individual `.txt` and `.json` files per config
 
-- `can2RNET/ppts/DEFCON24_chairhacking.pdf` - Personal story presentation
-- `can2RNET/ppts/canPPT.pdf` - Technical presentation (R-Net protocol, exploits)
-- `RNET_FRAME_DICTIONARY.md` - Comprehensive frame reference (590+ lines)
+- `docs/presentations/DEFCON24_chairhacking.pdf` - Personal story presentation
+- `docs/presentations/canPPT.pdf` - Technical presentation (R-Net protocol, exploits)
+- `reference/RNET_FRAME_DICTIONARY.md` - Comprehensive frame reference (590+ lines)

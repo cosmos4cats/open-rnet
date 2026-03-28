@@ -97,7 +97,7 @@ docs/
 
 - **Understand the full protocol** → [RNET_PROTOCOL_SPECIFICATION.md](RNET_PROTOCOL_SPECIFICATION.md)
 - **Set up my hardware** → [Getting Started](GETTING_STARTED.md#hardware-setup)
-- **Look up a frame ID** → [Frame Dictionary](../RNET_FRAME_DICTIONARY.md)
+- **Look up a frame ID** → [Frame Dictionary](../reference/RNET_FRAME_DICTIONARY.md)
 - **Look up an error code** → [Error Codes](RNET_ERROR_CODES.md)
 - **Use programmer mode** → [R-Net Programmer Protocol](RNET_PROGRAMMER_PROTOCOL.md)
 - **Understand authentication** → [Serial Numbers](SERIAL_NUMBERS.md)
@@ -148,10 +148,10 @@ docs/
 | File | Location | Description |
 |------|----------|-------------|
 | CLAUDE.md | `../CLAUDE.md` | Project overview |
-| RNET_FRAME_DICTIONARY.md | `../` | Frame reference (590+ entries) |
+| RNET_FRAME_DICTIONARY.md | `../reference/` | Frame reference (590+ entries) |
 | R-Net Configs/ | `../R-Net Configs/` | 25+ .R-net configuration exports |
 | tools/README.md | `../tools/` | Analysis tools |
-| canPPT.pdf | `../chair_control/` | DEFCON24 presentation |
+| canPPT.pdf | `../docs/presentations/` | DEFCON24 presentation |
 
 ---
 

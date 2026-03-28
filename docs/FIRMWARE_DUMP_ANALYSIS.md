@@ -193,5 +193,5 @@ srec_cat firmware.s19 -crop 0x4000 0x8000 -o code.s19
 ## References
 
 - `docs/RNET_PROGRAMMER_PROTOCOL.md` - How these dumps were likely extracted
-- `RNET_FRAME_DICTIONARY.md` - Protocol documentation
+- `../reference/RNET_FRAME_DICTIONARY.md` - Protocol documentation
 - Freescale HCS08 Reference Manual

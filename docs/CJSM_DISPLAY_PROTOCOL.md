@@ -153,5 +153,5 @@ text = data.decode('ascii')  # "Driv"
 ## References
 
 - Main protocol documentation: `RNET_PROTOCOL_GUIDE.md`
-- Frame dictionary: `RNET_FRAME_DICTIONARY.md`
+- Frame dictionary: `../reference/RNET_FRAME_DICTIONARY.md`
 - Analysis source: `wireshark/aug19th_hotplug_cjsm.pcapng`

@@ -511,7 +511,7 @@ print(dissect_frame(frame))
 ## References
 
 - DEFCON24 Presentation (2016) - Stephen Chavez & Specter
-- `RNET_FRAME_DICTIONARY.md` - Complete frame reference
+- `../reference/RNET_FRAME_DICTIONARY.md` - Complete frame reference
 - `wireshark/` - Packet captures for analysis
 - `can2RNET/` - Python library source
 

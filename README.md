@@ -33,7 +33,7 @@ sudo ip link set can0 up type can bitrate 125000
 candump can0 -L
 
 # Run joystick control (FollowJSM method)
-python3 can2RNET/JoyLocal.py
+python3 contrib/can2RNET/JoyLocal.py
 ```
 
 See **[Getting Started](docs/GETTING_STARTED.md)** for full hardware setup instructions.
@@ -46,7 +46,7 @@ See **[Getting Started](docs/GETTING_STARTED.md)** for full hardware setup instr
 |----------|-------------|
 | **[Protocol Specification](docs/RNET_PROTOCOL_SPECIFICATION.md)** | Full reverse-engineered R-Net specification |
 | **[Protocol Guide](docs/RNET_PROTOCOL_GUIDE.md)** | Protocol overview and quick reference |
-| **[Frame Dictionary](RNET_FRAME_DICTIONARY.md)** | Complete frame reference (590+ entries) |
+| **[Frame Dictionary](reference/RNET_FRAME_DICTIONARY.md)** | Complete frame reference (590+ entries) |
 | **[Quick Reference](docs/QUICK_REFERENCE.md)** | Cheat sheet for common CAN operations |
 
 ### Device Protocols
@@ -250,8 +250,8 @@ Found something new? Please contribute:
 
 ## References
 
-- [DEFCON24 Technical Presentation](can2RNET/ppts/canPPT.pdf)
-- [DEFCON24 Personal Story Presentation](can2RNET/ppts/DEFCON24_chairhacking.pdf)
+- [DEFCON24 Technical Presentation](docs/presentations/canPPT.pdf)
+- [DEFCON24 Personal Story Presentation](docs/presentations/DEFCON24_chairhacking.pdf)
 - [can-utils](https://github.com/linux-can/can-utils)
 - [SocketCAN Documentation](https://www.kernel.org/doc/html/latest/networking/can.html)
 

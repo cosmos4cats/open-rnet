@@ -583,5 +583,5 @@ The `rnet_programmer.py` tool implements this protocol:
 - `wireshark/programmer_write_file_july2017.pcapng` - Captured programmer write session
 - `wireshark/ics_write_config.pcapng` - ICS configuration transfer
 - `new/src/test.cpp` - Captured programmer bus queries (lines 492-591)
-- `RNET_FRAME_DICTIONARY.md` - Complete frame reference
+- `../reference/RNET_FRAME_DICTIONARY.md` - Complete frame reference
 - DongleInterface.dll v3.0.0.0 (PG Drives Technology) - Source of POP/REBUS/ODI terminology, transfer codes, ODI classes, timing constants, USB dongle protocol, connection state machine, and access levels

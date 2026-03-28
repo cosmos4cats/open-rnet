@@ -179,7 +179,7 @@ Extended:  02000100#0064
 
 - `docs/RNET_PROTOCOL_GUIDE.md` - Full protocol documentation
 - `docs/QUICK_REFERENCE.md` - Cheat sheet
-- `RNET_FRAME_DICTIONARY.md` - Complete frame reference
+- `../reference/RNET_FRAME_DICTIONARY.md` - Complete frame reference
 - `CLAUDE.md` - Project overview
 
 ## Control Methods
