@@ -199,7 +199,6 @@ Lower CAN ID = Higher priority (CAN arbitration)
 
 | ID Pattern | Description |
 |------------|-------------|
-| 0x0006C01F | Sleep reset (prevents CAN bus sleep) |
 | 0x00E00000 | Serial number heartbeat |
 | 0x1FssXXkk | Serial challenge/response |
 | 0x1ECmmXtt | Mode configuration |
@@ -1051,7 +1050,6 @@ JOY   │          │          │          │          │  ├─02000X00#�
 
 | ID Pattern | Description |
 |------------|-------------|
-| 0x0006C01F | Sleep reset (prevents CAN bus sleep mode) |
 | 0x00E00000 | Serial heartbeat |
 | 0x1F0X0000-0x1F7X0000 | Auth challenge/response |
 | 0x1FB0000X | Device enumeration |

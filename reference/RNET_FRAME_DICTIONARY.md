@@ -25,8 +25,6 @@ Comprehensive reference of all known R-Net CAN frames, compiled from pcap analys
 | `004#` | STD | JSM sleep commencing |
 | `004#R` | RTR | Related to sleep/wake sequence |
 | `00C#` | STD | JSM test CAN connection (checks for ACK before wake). If sent while JSM is on, turns it off |
-| `0006C01F#` | XTD | CAN bus sleep/wake reset. Sent to prevent CAN bus from entering sleep mode. (Source: DongleInterface.dll `CAN_ID_SLEEP_RESET`) |
-
 ---
 
 ## 2. SERIAL NUMBER / IDENTIFICATION
@@ -259,10 +257,6 @@ Extended frames used for bulk configuration/firmware transfer:
 | `061#004M0000` | STD | JSMtx select mode M (last mode must be suspended first) |
 | `061#00400000` | STD | Select mode 0 (drive) |
 | `061#00480000` | STD | Select mode 8 (**OBP — On-Board Programming**). Mode 8 is reserved for OBP. Activated by Horn+On/Off button combo or via mode change frames. Requires "OBP Keycode Entry"=Yes (OEM param). See `docs/OBP_ENABLE_GUIDE.md` |
-| `42D#` | STD | Slot change notification. Sent when a device's slot assignment changes on the network. (Source: DongleInterface.dll `SLOT_CHANGED_STD_ID`) |
-| `431#` | STD | Mode change notification. Broadcast when the active operating mode changes. (Source: DongleInterface.dll `MODE_CHANGE_ID`) |
-| `436#` | STD | Profile/speed change notification. Broadcast when the active speed profile changes. (Source: DongleInterface.dll `PROFILE_CHANGE_ID`) |
-
 ---
 
 ## 6. JOYSTICK POSITION (DRIVE CONTROL)
@@ -594,7 +588,6 @@ Type 0x0001: Device serial info
 10. **BTM/cJSM:** Use different XOR keys; cJSM uses slot 8+ range
 11. **Config transfer:** Extended frames 0x1E3X-0x1E8X for bulk data
 12. **POP Segmented:** 0x1E000000 (response) and 0x1E400000 (request) base IDs for multi-frame parameter transfers. Node and transfer code encoded in ID bits
-13. **DongleInterface.dll IDs:** 0x42D (slot change), 0x431 (mode change), 0x436 (profile change) are notification frames discovered via R-Net Programmer DLL reverse engineering
 
 ---
 

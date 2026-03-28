@@ -36,11 +36,6 @@ class SpeedProfile:
     """Speed/drive profile configuration"""
     name: str
     offset: int
-    max_forward: int = 0
-    max_reverse: int = 0
-    acceleration: int = 0
-    deceleration: int = 0
-    turn_speed: int = 0
     raw_data: str = ""
 
 
@@ -58,9 +53,6 @@ class SeatingFunction:
     """Seating/actuator function configuration"""
     name: str
     offset: int
-    speed: int = 0
-    range_min: int = 0
-    range_max: int = 0
     raw_data: str = ""
 
 
@@ -204,18 +196,18 @@ class RNetConfigParser:
 
         seen_names = set()
 
-        # Look for 'dddd' prefix followed by readable name
+        # Speed profile blocks are 40 bytes:
+        #   [4 bytes: "dddd" prefix] [20 bytes: name, space-padded] [16 bytes: metadata/pointers]
+        # The metadata bytes are internal references, not speed values.
+        # Actual speed parameters are stored via POP parameter exchange.
         i = start
-        while i < end - 28:
-            chunk = self.data[i:i+28]
-
+        while i < end - 40:
             # Speed profiles start with 'dddd' prefix (0x64646464)
-            if chunk[:4] == SPEED_PREFIX:
-                # Extract the 16-byte name field
-                name_raw = chunk[4:20]
-                name = self._clean_string(name_raw)
+            if self.data[i:i+4] == SPEED_PREFIX:
+                # Name is 20 bytes (space-padded)
+                name = self._clean_string(self.data[i+4:i+24])
 
-                # Valid profile names are at least 3 chars and not just 'd's
+                # Valid profile names are at least 3 chars
                 if name and len(name) >= 3:
                     # Normalize: strip leading 'd' chars that leaked in
                     while name.startswith('d') and len(name) > 3:
@@ -231,24 +223,15 @@ class RNetConfigParser:
 
                     if name and name not in seen_names and not is_noise:
                         seen_names.add(name)
-
-                        # Parse configuration bytes (after 20-byte name block)
-                        config_bytes = chunk[20:28]
-
                         profile = SpeedProfile(
                             name=name,
                             offset=i,
-                            max_forward=config_bytes[0] if len(config_bytes) > 0 else 0,
-                            max_reverse=config_bytes[1] if len(config_bytes) > 1 else 0,
-                            acceleration=config_bytes[2] if len(config_bytes) > 2 else 0,
-                            deceleration=config_bytes[3] if len(config_bytes) > 3 else 0,
-                            turn_speed=config_bytes[4] if len(config_bytes) > 4 else 0,
-                            raw_data=chunk.hex()
+                            raw_data=self.data[i:i+40].hex()
                         )
                         self.config.speed_profiles.append(profile)
 
-                # Jump past this block
-                i += 24
+                # Each block is 40 bytes
+                i += 40
             else:
                 i += 1
 
@@ -274,9 +257,9 @@ class RNetConfigParser:
                         self.config.speed_profiles.append(profile)
 
     def _parse_seating_functions(self):
-        """Parse seating/actuator function configuration"""
-        # Seating functions are around 0x0C00-0x1000
-        # Format: 20-byte name (padded) + control bytes
+        """Parse seating/actuator function names"""
+        # Seating function names are contiguous 20-byte entries (space-padded).
+        # No config data is interleaved — actual settings are via POP parameters.
 
         start = 0x0800
         end = min(len(self.data), 0x1200)
@@ -288,17 +271,10 @@ class RNetConfigParser:
 
             if text in self.SEATING_NAMES and text not in seen_names:
                 seen_names.add(text)
-
-                # Parse control bytes after name
-                config_bytes = self.data[i+20:i+28] if len(self.data) > i + 28 else b''
-
                 func = SeatingFunction(
                     name=text,
                     offset=i,
-                    speed=config_bytes[0] if len(config_bytes) > 0 else 0,
-                    range_min=config_bytes[1] if len(config_bytes) > 1 else 0,
-                    range_max=config_bytes[2] if len(config_bytes) > 2 else 0,
-                    raw_data=self.data[i:i+28].hex()
+                    raw_data=self.data[i:i+20].hex()
                 )
                 self.config.seating_functions.append(func)
 
@@ -375,11 +351,8 @@ def format_output(config: RNetConfig, show_raw: bool = False) -> str:
     if config.speed_profiles:
         lines.append("SPEED PROFILES")
         lines.append("-" * 40)
-        lines.append(f"  {'Name':<20} {'Fwd':>5} {'Rev':>5} {'Acc':>5} {'Dec':>5} {'Turn':>5}")
-        lines.append(f"  {'-'*20} {'-'*5} {'-'*5} {'-'*5} {'-'*5} {'-'*5}")
         for p in config.speed_profiles:
-            lines.append(f"  {p.name:<20} {p.max_forward:>5} {p.max_reverse:>5} "
-                        f"{p.acceleration:>5} {p.deceleration:>5} {p.turn_speed:>5}")
+            lines.append(f"  {p.name:20} @ 0x{p.offset:04X}")
         lines.append("")
 
     # Motor settings
@@ -400,7 +373,7 @@ def format_output(config: RNetConfig, show_raw: bool = False) -> str:
         lines.append("SEATING FUNCTIONS")
         lines.append("-" * 40)
         for f in config.seating_functions:
-            lines.append(f"  {f.name:16} @ 0x{f.offset:04X}  speed={f.speed}")
+            lines.append(f"  {f.name:20} @ 0x{f.offset:04X}")
         lines.append("")
 
     # Raw sections

@@ -174,12 +174,6 @@ POP_SEG_NODE_SHIFT = 15
 POP_SEG_TC_MASK = 0x003C0000
 POP_SEG_TC_SHIFT = 18
 
-# Notification frame IDs (from DongleInterface.dll)
-SLOT_CHANGED_ID = 0x42D         # Device slot change notification
-MODE_CHANGE_ID = 0x431          # Mode change notification
-PROFILE_CHANGE_ID = 0x436       # Profile/speed change notification
-SLEEP_RESET_ID = 0x0006C01F     # CAN bus sleep/wake reset (extended)
-
 # Timing constants (from DongleInterface.dll)
 POP_QCK_TIMEOUT = 1.0           # Quick POP transaction timeout (1000ms)
 POP_SEG_TIMEOUT = 0.1           # Segmented timeout per segment (100ms)

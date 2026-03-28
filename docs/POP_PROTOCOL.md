@@ -390,22 +390,6 @@ POP operations return error codes from the `RB_ERROR` enumeration:
 
 ---
 
-## Notification CAN IDs
-
-R-Net devices broadcast notifications on specific CAN IDs when state changes occur. The programmer monitors these to keep its view of the network current.
-
-| CAN ID | Name | Type | Purpose |
-|--------|------|------|---------|
-| `0x42D` | `SLOT_CHANGED_STD_ID` | Standard 11-bit | Device slot assignment changed on network |
-| `0x431` | `MODE_CHANGE_ID` | Standard 11-bit | Operating mode changed (e.g., Drive -> Seating) |
-| `0x436` | `PROFILE_CHANGE_ID` | Standard 11-bit | Speed profile changed (e.g., Indoor -> Outdoor) |
-| `0x0006C01F` | `CAN_ID_SLEEP_RESET` | Extended 29-bit | Sent periodically to prevent CAN bus sleep/shutdown |
-
-**Usage:**
-- The programmer monitors `SLOT_CHANGED_STD_ID` to detect when devices join or leave the network
-- `MODE_CHANGE_ID` and `PROFILE_CHANGE_ID` trigger re-read of active configuration
-- `CAN_ID_SLEEP_RESET` must be sent periodically during long programming sessions to prevent the R-Net network from entering sleep mode
-
 ---
 
 ## Flash-Over-CAN
