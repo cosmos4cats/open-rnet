@@ -1,0 +1,50 @@
+======================================================================
+R-NET CONFIGURATION: Frontier V6 stock OEM-CS14050871.R-net
+======================================================================
+
+BASIC INFO
+----------------------------------------
+  File size:     7041 bytes
+  Serial:        CS14050871
+  Header magic:  03000000
+  Checksum:      0000dfeb
+  XOR patterns:  20
+
+SPEED PROFILES
+----------------------------------------
+  SLOWEST              @ 0x0260
+  SLOW                 @ 0x0288
+  MEDIUM               @ 0x02B0
+  FAST                 @ 0x02D8
+  V6AT FAST            @ 0x0300
+  Profile 7            @ 0x0350
+  Attendant            @ 0x0378
+
+MOTOR SETTINGS
+----------------------------------------
+  Base current:  55%
+  Max current:   55%
+
+  Profile current limits:
+    Profile 1:  55%  (offset 0x0B23)
+    Profile 2:  55%  (offset 0x0B30)
+    Profile 3:  55%  (offset 0x0B3D)
+    Profile 4:  55%  (offset 0x0B4A)
+    Profile 5:  55%  (offset 0x0B57)
+    Profile 6:  55%  (offset 0x0B64)
+    Profile 7:  55%  (offset 0x0B71)
+    Profile 8:  55%  (offset 0x0B7E)
+    Profile 9:  55%  (offset 0x0B8B)
+    Profile 10:  55%  (offset 0x0B98)
+    Profile 11:  55%  (offset 0x0BA5)
+    Profile 12:  55%  (offset 0x0BB2)
+
+SEATING FUNCTIONS
+----------------------------------------
+  Tilt                 @ 0x0886
+  Seat Lift            @ 0x089F
+  Recline              @ 0x08B3
+  Transfer Tilt        @ 0x08CB
+  Leg                  @ 0x08DF
+  Layback              @ 0x08ED
+

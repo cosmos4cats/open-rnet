@@ -1,0 +1,52 @@
+======================================================================
+R-NET CONFIGURATION: Sept-2017-V6-120-FINAL-no-ESP-2.R-net
+======================================================================
+
+BASIC INFO
+----------------------------------------
+  File size:     6121 bytes
+  Serial:        N/A
+  Header magic:  03000000
+  Checksum:      00007832
+  XOR patterns:  20
+
+MODE PROFILES
+----------------------------------------
+  Mode                 @ 0x01C9
+
+SPEED PROFILES
+----------------------------------------
+  SLOWEST              @ 0x0260
+  SLOW                 @ 0x0288
+  MED                  @ 0x02B0
+  FAST                 @ 0x02D8
+  V6AT FAST            @ 0x0300
+  Profile 6            @ 0x0328
+  Profile 7            @ 0x0350
+  Attendant            @ 0x0378
+
+MOTOR SETTINGS
+----------------------------------------
+  Base current:  55%
+  Max current:   55%
+
+  Profile current limits:
+    Profile 1:  55%  (offset 0x0B23)
+    Profile 2:  55%  (offset 0x0B30)
+    Profile 3:  55%  (offset 0x0B3D)
+    Profile 4:  55%  (offset 0x0B4A)
+    Profile 5:  55%  (offset 0x0B57)
+    Profile 6:  55%  (offset 0x0B64)
+    Profile 7:  55%  (offset 0x0B71)
+    Profile 8:  55%  (offset 0x0B7E)
+    Profile 9:  55%  (offset 0x0B8B)
+    Profile 10:  55%  (offset 0x0B98)
+    Profile 11:  55%  (offset 0x0BA5)
+    Profile 12:  55%  (offset 0x0BB2)
+
+SEATING FUNCTIONS
+----------------------------------------
+  Elevator             @ 0x088A
+  Recline              @ 0x089E
+  Tilt                 @ 0x08B1
+

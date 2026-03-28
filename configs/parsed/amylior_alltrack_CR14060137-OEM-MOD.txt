@@ -1,0 +1,47 @@
+======================================================================
+R-NET CONFIGURATION: CR14060137-OEM-MOD.R-net
+======================================================================
+
+BASIC INFO
+----------------------------------------
+  File size:     6369 bytes
+  Serial:        CR14060137
+  Header magic:  03000000
+  Checksum:      00009f0c
+  XOR patterns:  20
+
+MODE PROFILES
+----------------------------------------
+  ING                  @ 0x0191
+  ONTROL               @ 0x01C9
+
+SPEED PROFILES
+----------------------------------------
+  idiot mode           @ 0x0260
+  Standard             @ 0x0288
+  StandardPWR          @ 0x02B0
+  DANGEROUS            @ 0x02D8
+  PWR-Tremor           @ 0x0300
+  OUTDOOR 1            @ 0x0328
+  OUTDOOR 2            @ 0x0350
+  ATTENDANT            @ 0x0378
+
+MOTOR SETTINGS
+----------------------------------------
+  Base current:  100%
+  Max current:   100%
+
+  Profile current limits:
+    Profile 1: 100%  (offset 0x0B23)
+    Profile 2: 100%  (offset 0x0B30)
+    Profile 3: 100%  (offset 0x0B3D)
+    Profile 4: 100%  (offset 0x0B4A)
+    Profile 5: 100%  (offset 0x0B57)
+    Profile 6: 100%  (offset 0x0B64)
+    Profile 7: 100%  (offset 0x0B71)
+    Profile 8: 100%  (offset 0x0B7E)
+    Profile 9: 100%  (offset 0x0B8B)
+    Profile 10: 100%  (offset 0x0B98)
+    Profile 11: 100%  (offset 0x0BA5)
+    Profile 12: 100%  (offset 0x0BB2)
+
