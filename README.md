@@ -3,6 +3,8 @@
 [![DEFCON24](https://img.shields.io/badge/DEFCON-24-red.svg)](https://www.defcon.org/)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
+![Open R-Net - Wheelchair CAN Bus Hacking](youtube_thumbnail.png)
+
 **Reverse engineering the R-Net CAN bus protocol for power wheelchair accessibility**
 
 *Originally presented at DEFCON24 (August 2016) by Stephen Chavez & Specter*

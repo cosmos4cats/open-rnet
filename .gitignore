@@ -34,6 +34,7 @@ Thumbs.db
 *.jpg
 *.jpeg
 *.png
+!youtube_thumbnail.png
 *.gif
 *.mp4
 *.mov
