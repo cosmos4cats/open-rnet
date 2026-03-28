@@ -12,14 +12,16 @@ BASIC INFO
 
 SPEED PROFILES
 ----------------------------------------
-  Indoor               @ 0x0260
-  Normal               @ 0x0288
-  Profile 3            @ 0x02B0
-  Profile 4            @ 0x02D8
-  Profile 5            @ 0x0300
-  Profile 6            @ 0x0328
-  Profile 7            @ 0x0350
-  Attendant            @ 0x0378
+  Name              Fwd  Rev  Acc  Dec  Turn  TnAc   P7   P8   P9
+  ---------------- ---- ---- ---- ---- ----- ----- ---- ---- ----
+  Indoor            100  100   50  100   100   100  100  100  100
+  Normal            100  100   50  100   100   100  100  100  100
+  Profile 3         100  100   50  100   100   100  100  100  100
+  Profile 4         100  100   50  100   100   100  100  100  100
+  Profile 5           1   16    0    0   100    80  106  206  108
+  Profile 6           0    0    0    0     0     0    0    0    0
+  Profile 7           0    0    0    0     0     0    0    0    0
+  Attendant           0    0    0    0     0     0    0    0    0
 
 MOTOR SETTINGS
 ----------------------------------------

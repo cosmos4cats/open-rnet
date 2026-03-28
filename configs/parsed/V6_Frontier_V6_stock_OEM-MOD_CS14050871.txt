@@ -12,13 +12,15 @@ BASIC INFO
 
 SPEED PROFILES
 ----------------------------------------
-  SLOWEST              @ 0x0260
-  SLOW                 @ 0x0288
-  MEDIUM               @ 0x02B0
-  FAST                 @ 0x02D8
-  V6AT FAST            @ 0x0300
-  Profile 7            @ 0x0350
-  Attendant            @ 0x0378
+  Name              Fwd  Rev  Acc  Dec  Turn  TnAc   P7   P8   P9
+  ---------------- ---- ---- ---- ---- ----- ----- ---- ---- ----
+  SLOWEST            40   35   25   25    25    50   35   20   20
+  SLOW               65   65   27   35    30    50   35   30   30
+  MEDIUM             80   65   30   40    35    50   35   40   40
+  FAST              100   65   34   40    35    50   35   40   40
+  V6AT FAST         100   50   40   50    50    60   45   50   60
+  Profile 7         100   50   40   50    50    60   45   50   60
+  Attendant          40   35   15   25    25    50   50   20   50
 
 MOTOR SETTINGS
 ----------------------------------------

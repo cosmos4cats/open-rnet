@@ -36,6 +36,24 @@ class SpeedProfile:
     """Speed/drive profile configuration"""
     name: str
     offset: int
+    max_forward: int = 0
+    max_forward_min: int = 0
+    max_reverse: int = 0
+    max_reverse_min: int = 0
+    acceleration: int = 0
+    acceleration_min: int = 0
+    deceleration: int = 0
+    deceleration_min: int = 0
+    turn_speed: int = 0
+    turn_speed_min: int = 0
+    turn_accel: int = 0
+    turn_accel_min: int = 0
+    param7: int = 0
+    param7_min: int = 0
+    param8: int = 0
+    param8_min: int = 0
+    param9: int = 0
+    param9_min: int = 0
     raw_data: str = ""
 
 
@@ -184,36 +202,35 @@ class RNetConfigParser:
             else:
                 i += 1
 
+    # Header marking each speed parameter block: 32320001 + 2-byte checksum + 18 bytes params
+    SPEED_PARAM_HDR = bytes([0x32, 0x32, 0x00, 0x01])
+
     def _parse_speed_profiles(self):
         """Parse speed/drive profiles (Indoor, Fast, etc.)"""
-        # Speed profiles are around 0x0250-0x0600
-        # Format: prefix (often 'dddd') + 16-byte name + config bytes
-        # Profile blocks are typically 24-28 bytes with structure:
-        #   [prefix 4 bytes] [name 16 bytes, padded] [config ~8 bytes]
+        # Speed profile name table is at 0x0250-0x0600.
+        # Name blocks are 40 bytes: [4 "dddd"] [20 name] [16 metadata]
+        #
+        # Speed parameter values are in a separate region (~0x06B0-0x07A0).
+        # Each parameter block is: [6 separator 64500000 5064] [4 header 32320001]
+        #   [2 checksum] [18 bytes: 9 x (value, min) pairs]
+        # Parameters in order: max_fwd, max_rev, accel, decel, turn_speed,
+        #   turn_accel, param7, param8, param9
 
+        # Step 1: Extract profile names from name table
         start = 0x0250
         end = min(len(self.data), 0x0600)
-
         seen_names = set()
+        profile_names = []
 
-        # Speed profile blocks are 40 bytes:
-        #   [4 bytes: "dddd" prefix] [20 bytes: name, space-padded] [16 bytes: metadata/pointers]
-        # The metadata bytes are internal references, not speed values.
-        # Actual speed parameters are stored via POP parameter exchange.
         i = start
         while i < end - 40:
-            # Speed profiles start with 'dddd' prefix (0x64646464)
             if self.data[i:i+4] == SPEED_PREFIX:
-                # Name is 20 bytes (space-padded)
                 name = self._clean_string(self.data[i+4:i+24])
 
-                # Valid profile names are at least 3 chars
                 if name and len(name) >= 3:
-                    # Normalize: strip leading 'd' chars that leaked in
                     while name.startswith('d') and len(name) > 3:
                         name = name[1:]
 
-                    # Skip pure noise patterns
                     noise_patterns = ['xx', 'dd', '##', '--']
                     is_noise = (
                         all(c in 'dDxX-#0123456789 ' for c in name) or
@@ -223,38 +240,45 @@ class RNetConfigParser:
 
                     if name and name not in seen_names and not is_noise:
                         seen_names.add(name)
-                        profile = SpeedProfile(
-                            name=name,
-                            offset=i,
-                            raw_data=self.data[i:i+40].hex()
-                        )
-                        self.config.speed_profiles.append(profile)
+                        profile_names.append((name, i))
 
-                # Each block is 40 bytes
                 i += 40
             else:
                 i += 1
 
-        # Secondary pass: look for keyword-based profiles that might not have dddd prefix
-        keywords = ['SLOW', 'FAST', 'MEDIUM', 'MED', 'Indoor', 'Outdoor',
-                   'Normal', 'Profile', 'Speed', 'DANGER', 'DIABLO',
-                   'SOCCER', 'Torque', 'idiot', 'PWR', 'Standard', 'Attendant',
-                   'High', 'Low']
+        # Step 2: Find speed parameter blocks via header pattern (32320001)
+        # Each block: [32320001] [2-byte checksum] [18 bytes: 9 x (value, min) pairs]
+        # Last block is a sentinel (starts with (1,0), (2,0)) — skip it.
+        param_blocks = []
+        for i in range(0x0600, min(len(self.data), 0x0900) - 24):
+            if self.data[i:i+4] == self.SPEED_PARAM_HDR:
+                params_start = i + 6  # skip header(4) + checksum(2)
+                if params_start + 18 <= len(self.data):
+                    params = self.data[params_start:params_start + 18]
+                    pairs = [(params[k], params[k+1]) for k in range(0, 18, 2)]
+                    # Skip sentinel block: starts with (1,0), (2,0), (0,0)
+                    if pairs[0] == (1, 0) and pairs[1] == (2, 0):
+                        continue
+                    param_blocks.append((i, pairs))
 
-        for i in range(start, end - 20, 4):  # Step by 4 to avoid overlaps
-            text = self._clean_string(self.data[i:i+16])
-            if text and len(text) >= 4 and text not in seen_names:
-                # Must contain a speed-related keyword
-                if any(kw.lower() in text.lower() for kw in keywords):
-                    # Verify it's a clean name (starts with uppercase letter, no junk prefix)
-                    if text[0].isupper() and not any(text.startswith(p) for p in ['ddd', 'xxx', '---']):
-                        seen_names.add(text)
-                        profile = SpeedProfile(
-                            name=text,
-                            offset=i,
-                            raw_data=self.data[i:i+24].hex()
-                        )
-                        self.config.speed_profiles.append(profile)
+        # Step 3: Match names to parameter blocks (same order)
+        for idx, (name, name_offset) in enumerate(profile_names):
+            profile = SpeedProfile(name=name, offset=name_offset,
+                                   raw_data=self.data[name_offset:name_offset+40].hex())
+
+            if idx < len(param_blocks):
+                _, pairs = param_blocks[idx]
+                profile.max_forward, profile.max_forward_min = pairs[0]
+                profile.max_reverse, profile.max_reverse_min = pairs[1]
+                profile.acceleration, profile.acceleration_min = pairs[2]
+                profile.deceleration, profile.deceleration_min = pairs[3]
+                profile.turn_speed, profile.turn_speed_min = pairs[4]
+                profile.turn_accel, profile.turn_accel_min = pairs[5]
+                profile.param7, profile.param7_min = pairs[6]
+                profile.param8, profile.param8_min = pairs[7]
+                profile.param9, profile.param9_min = pairs[8]
+
+            self.config.speed_profiles.append(profile)
 
     def _parse_seating_functions(self):
         """Parse seating/actuator function names"""
@@ -351,8 +375,17 @@ def format_output(config: RNetConfig, show_raw: bool = False) -> str:
     if config.speed_profiles:
         lines.append("SPEED PROFILES")
         lines.append("-" * 40)
-        for p in config.speed_profiles:
-            lines.append(f"  {p.name:20} @ 0x{p.offset:04X}")
+        has_params = any(p.max_forward for p in config.speed_profiles)
+        if has_params:
+            lines.append(f"  {'Name':<16} {'Fwd':>4} {'Rev':>4} {'Acc':>4} {'Dec':>4} {'Turn':>5} {'TnAc':>5} {'P7':>4} {'P8':>4} {'P9':>4}")
+            lines.append(f"  {'-'*16} {'-'*4} {'-'*4} {'-'*4} {'-'*4} {'-'*5} {'-'*5} {'-'*4} {'-'*4} {'-'*4}")
+            for p in config.speed_profiles:
+                lines.append(f"  {p.name:<16} {p.max_forward:>4} {p.max_reverse:>4} "
+                            f"{p.acceleration:>4} {p.deceleration:>4} {p.turn_speed:>5} "
+                            f"{p.turn_accel:>5} {p.param7:>4} {p.param8:>4} {p.param9:>4}")
+        else:
+            for p in config.speed_profiles:
+                lines.append(f"  {p.name:20} @ 0x{p.offset:04X}")
         lines.append("")
 
     # Motor settings

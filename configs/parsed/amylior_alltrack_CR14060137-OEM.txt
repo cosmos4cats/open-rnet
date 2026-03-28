@@ -17,14 +17,16 @@ MODE PROFILES
 
 SPEED PROFILES
 ----------------------------------------
-  idiot mode           @ 0x0260
-  Standard             @ 0x0288
-  StandardPWR          @ 0x02B0
-  DANGEROUS            @ 0x02D8
-  PWR-Tremor           @ 0x0300
-  OUTDOOR 1            @ 0x0328
-  OUTDOOR 2            @ 0x0350
-  ATTENDANT            @ 0x0378
+  Name              Fwd  Rev  Acc  Dec  Turn  TnAc   P7   P8   P9
+  ---------------- ---- ---- ---- ---- ----- ----- ---- ---- ----
+  idiot mode         85   20   10   20    30    20   20   30   20
+  Standard          100   25   15   27    30    30   30   32   25
+  StandardPWR       100  100   19   35    40    35   30   50   35
+  DANGEROUS         100   25   15   27    30    30   30   32   25
+  PWR-Tremor         75   25   10   20    30    30   30   35   25
+  OUTDOOR 1         100   30   10   20    30    35   30   25   35
+  OUTDOOR 2          50   20   10   20    30    20   20   35   20
+  ATTENDANT           0    0    0    0     0     0    0    0    0
 
 MOTOR SETTINGS
 ----------------------------------------

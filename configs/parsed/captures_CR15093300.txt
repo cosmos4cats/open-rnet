@@ -12,12 +12,14 @@ BASIC INFO
 
 SPEED PROFILES
 ----------------------------------------
-  Profile 3            @ 0x026C
-  Profile 4            @ 0x0294
-  Profile 5            @ 0x02BC
-  Profile 6            @ 0x02E4
-  Profile 7            @ 0x030C
-  Attendant            @ 0x0334
+  Name              Fwd  Rev  Acc  Dec  Turn  TnAc   P7   P8   P9
+  ---------------- ---- ---- ---- ---- ----- ----- ---- ---- ----
+  Profile 3         100   30   25   30    40    30   30   27   35
+  Profile 4          40   22   11   20    25    17   30   20   12
+  Profile 5          40   22   11   20    25    17   30   20   12
+  Profile 6          40   22   11   20    25    17   30   20   12
+  Profile 7         100   30   15   18    30    22   35   20   16
+  Attendant          40   25   10   20    25    40   30   20   15
 
 MOTOR SETTINGS
 ----------------------------------------

@@ -16,14 +16,16 @@ MODE PROFILES
 
 SPEED PROFILES
 ----------------------------------------
-  SLOWEST              @ 0x0260
-  SLOW                 @ 0x0288
-  MED                  @ 0x02B0
-  FAST                 @ 0x02D8
-  V6AT FAST            @ 0x0300
-  Profile 6            @ 0x0328
-  Profile 7            @ 0x0350
-  Attendant            @ 0x0378
+  Name              Fwd  Rev  Acc  Dec  Turn  TnAc   P7   P8   P9
+  ---------------- ---- ---- ---- ---- ----- ----- ---- ---- ----
+  SLOWEST            40   35   25   25    35    50   35   25   16
+  SLOW               65   65   27   35    25    50   30   20   12
+  MED                80   80   30   40    35    50   35   25   16
+  FAST              100  100   34   40    35    50   35   25   16
+  V6AT FAST          93   35   16   20    30    45   35   20   16
+  Profile 6          40   25   10   20    25    40   30   20   15
+  Profile 7          65   35   13   15    25    35   30   15   12
+  Attendant           0    0    0    0     0     0    0    0    0
 
 MOTOR SETTINGS
 ----------------------------------------

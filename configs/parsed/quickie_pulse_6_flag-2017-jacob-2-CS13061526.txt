@@ -12,14 +12,16 @@ BASIC INFO
 
 SPEED PROFILES
 ----------------------------------------
-  idiot mode           @ 0x0260
-  Medium               @ 0x0288
-  Fast                 @ 0x02B0
-  DIABLO!!!            @ 0x02D8
-  Profile 5            @ 0x0300
-  Profile 6            @ 0x0328
-  Profile 7            @ 0x0350
-  Attendant            @ 0x0378
+  Name              Fwd  Rev  Acc  Dec  Turn  TnAc   P7   P8   P9
+  ---------------- ---- ---- ---- ---- ----- ----- ---- ---- ----
+  idiot mode        100  100   20   20    20    10   12   15   20
+  Medium            100  100   35   35    35    15   15   18   30
+  Fast              100  100   40   50    40    20   20   20   35
+  DIABLO!!!         100   40   40  100   100   100  100  100  100
+  Profile 5         100   50   40   50    50    60   45   50   40
+  Profile 6         100   50   40   50    50    60   45   50   40
+  Profile 7          40   35   25   35    35    45   30   35   45
+  Attendant           0    0    0    0     0     0    0    0    0
 
 MOTOR SETTINGS
 ----------------------------------------

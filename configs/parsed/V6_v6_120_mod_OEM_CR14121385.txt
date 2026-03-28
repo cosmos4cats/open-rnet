@@ -1,13 +1,13 @@
 ======================================================================
-R-NET CONFIGURATION: Sept-2017-V6-120-FINAL-no-ESP.R-net
+R-NET CONFIGURATION: v6 120 mod OEM CR14121385.R-net
 ======================================================================
 
 BASIC INFO
 ----------------------------------------
-  File size:     6121 bytes
-  Serial:        N/A
+  File size:     7181 bytes
+  Serial:        CR14121385
   Header magic:  03000000
-  Checksum:      00007832
+  Checksum:      00009d2c
   XOR patterns:  20
 
 MODE PROFILES
@@ -18,11 +18,11 @@ SPEED PROFILES
 ----------------------------------------
   Name              Fwd  Rev  Acc  Dec  Turn  TnAc   P7   P8   P9
   ---------------- ---- ---- ---- ---- ----- ----- ---- ---- ----
-  SLOWEST            40   35   25   25    35    50   35   25   16
-  SLOW               65   65   27   35    25    50   30   20   12
-  MED                80   80   30   40    35    50   35   20   16
-  FAST              100  100   30   40    35    50   35   20   16
-  V6AT FAST          93   35   16   20    30    45   35   20   16
+  Indoor            100  100   30   40    35    45   35   25   16
+  Normal             40   25   12   20    25    35   30   20   12
+  Profile 3          93   35   16   20    30    45   35   20   16
+  Profile 4          40   25   12   20    25    35   30   20   12
+  Profile 5          93   35   16   20    30    45   35   20   16
   Profile 6          40   25   10   20    25    40   30   20   15
   Profile 7          65   35   13   15    25    35   30   15   12
   Attendant           0    0    0    0     0     0    0    0    0

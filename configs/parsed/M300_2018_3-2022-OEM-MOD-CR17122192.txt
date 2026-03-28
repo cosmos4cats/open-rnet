@@ -12,15 +12,16 @@ BASIC INFO
 
 SPEED PROFILES
 ----------------------------------------
-  Indoor               @ 0x0260
-  Normal               @ 0x0288
-  High Torque          @ 0x02B0
-  Profile 4            @ 0x02D8
-  Profile 5            @ 0x0300
-  Profile 6            @ 0x0328
-  Profile 7            @ 0x0350
-  Attendant            @ 0x0378
-  Torque               @ 0x02B8
+  Name              Fwd  Rev  Acc  Dec  Turn  TnAc   P7   P8   P9
+  ---------------- ---- ---- ---- ---- ----- ----- ---- ---- ----
+  Indoor            100   70   25   60    20    70   15   25   15
+  Normal             60   60   25   60    20    40   15   25   15
+  High Torque       100   25   16   18    20    70   15   25   15
+  Profile 4          50   20   12   18    20    40   15   15   12
+  Profile 5         100   25   16   18    20    70   15   25   15
+  Profile 6         100   25   16   18    20    70   15   25   15
+  Profile 7          70   20    9   15    25    35   20   15   12
+  Attendant           0    0    0    0     0     0    0    0    0
 
 MOTOR SETTINGS
 ----------------------------------------
