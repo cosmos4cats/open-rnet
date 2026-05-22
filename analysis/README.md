@@ -89,8 +89,7 @@ tshark -X lua_script:analysis/wireshark/rnet_can.lua \
        -r captures/2026_AT_hackathon.log -Y "rnet.auth.network"
 
 # Live, dissected output — the equivalent of `candump can0 -L`:
-tshark -X lua_script:analysis/wireshark/rnet_can.lua \
-       -i can0 -l -T fields -e frame.time_relative -e _ws.col.info
+analysis/wireshark/rnet-dump -i can0
 ```
 
 See `analysis/wireshark/README.md` for the full field reference,

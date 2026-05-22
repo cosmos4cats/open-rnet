@@ -35,37 +35,44 @@ If you've installed the dissector to your Wireshark plugin path
 (`~/.local/lib/wireshark/plugins/` on Linux/macOS), drop the
 `-X lua_script:...` flag and just point at the capture.
 
-### Live capture — the dissector equivalent of `candump -L`
+### `rnet-dump` — candump-L-shaped output with decode
 
-For a live CAN interface (Linux SocketCAN), tshark will dissect
-frame-by-frame as they arrive. This is the dissected-output equivalent
-of `candump can0 -L`:
+A small wrapper script that produces the dissected equivalent of
+`candump can0 -L`. Each frame becomes one line: `(timestamp) iface
+CANID  decoded-info`.
 
 ```sh
-# Bring up the CAN interface
+# Live capture (Linux SocketCAN):
 sudo ip link set can0 up type can bitrate 125000
+analysis/wireshark/rnet-dump -i can0
 
-# Stream dissected output, one frame per line
-tshark -X lua_script:analysis/wireshark/rnet_can.lua \
-       -i can0 -l -T fields -e frame.time_relative -e _ws.col.info
+# From a capture file:
+analysis/wireshark/rnet-dump -r captures/2026_AT_hackathon.log
 ```
 
-Sample output (from `captures/2026_AT_hackathon.log`):
+Sample output:
 
 ```
-0.144131  Auth response seq=0 slot=1 key=0xDA val=0xB6 ✓ Table D [JSM serial]
-0.144730  Auth response seq=1 slot=1 key=0x30 val=0x80 ✓ Table D [JSM serial]
-0.145325  Auth response seq=2 slot=1 key=0xE1 val=0x21 ✓ Table D [JSM serial]
-0.149302  Auth response seq=0 slot=2 key=0xDA val=0xE7 ✓ Table D
+(0.144131) can0 1F01DAB6  Auth response seq=0 slot=1 key=0xDA val=0xB6 ✓ Table D [JSM serial]
+(0.144730) can0 1F113080  Auth response seq=1 slot=1 key=0x30 val=0x80 ✓ Table D [JSM serial]
+(0.145325) can0 1F21E121  Auth response seq=2 slot=1 key=0xE1 val=0x21 ✓ Table D [JSM serial]
+(0.149302) can0 1F02DAE7  Auth response seq=0 slot=2 key=0xDA val=0xE7 ✓ Table D
 ```
 
-vs. the raw `candump -L` form of the same frames:
+vs. the raw `candump can0 -L` form of the same frames:
 
 ```
-(0.144131) can0 1F0000C6#B6
-(0.144730) can0 1F0100C7#80
-(0.145325) can0 1F0200C8#21
-(0.149302) can0 1F0000A6#E7
+(0.144131) can0 1F01DAB6#
+(0.144730) can0 1F113080#
+(0.145325) can0 1F21E121#
+(0.149302) can0 1F02DAE7#
+```
+
+`rnet-dump` accepts any tshark argument, so display filters work too:
+
+```sh
+analysis/wireshark/rnet-dump -i can0 -Y 'rnet.auth.network'
+analysis/wireshark/rnet-dump -i can0 -Y 'rnet.pop.tc == 3'
 ```
 
 ### Info column
@@ -330,6 +337,7 @@ correlating profile/mode switching with frame timestamps.
 ```
 analysis/wireshark/
   rnet_can.lua             — the dissector
+  rnet-dump                — candump-L-shaped wrapper, dissected output
   README.md                — this file
   reassemble_transfers.py  — POP transfer reassembly companion
   pwc_params.json          — vendored Permobil PWC param_id → name snapshot

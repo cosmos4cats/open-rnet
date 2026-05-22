@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# rnet-dump — candump-L-shaped output with R-Net protocol decode.
+#
+# Drop-in replacement for `candump can0 -L` that runs each frame through
+# rnet_can.lua and appends the decoded info column. Output format:
+#
+#   (time) iface 1F0000C6  Auth response seq=0 slot=1 key=0xDA val=0xB6 ✓ Table D
+#
+# Usage:
+#   rnet-dump -i can0                # live capture
+#   rnet-dump -r captures/foo.log    # from a capture file
+#   rnet-dump -i can0 -Y 'rnet.auth.network'   # any tshark filter still works
+#
+# All arguments are passed through to tshark.
+
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LUA="$HERE/rnet_can.lua"
+
+if [[ ! -f "$LUA" ]]; then
+    echo "rnet-dump: cannot find rnet_can.lua at $LUA" >&2
+    exit 1
+fi
+
+exec tshark -X "lua_script:$LUA" \
+            -l \
+            -T fields \
+            -e frame.time_relative \
+            -e can.id \
+            -e _ws.col.info \
+            "$@" \
+    | awk -F'\t' '
+        $2 != "" { printf "(%.6f) can0 %08X  %s\n", $1, $2, $3 }
+        $2 == "" { printf "(%.6f)              %s\n", $1, $3 }
+      '
