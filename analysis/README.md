@@ -70,6 +70,33 @@ Extracts configuration transfer data from pcap files.
 python3 tools/extract_config_data.py wireshark/ics_write_config.pcapng output.bin
 ```
 
+## Wireshark Dissector
+
+### wireshark/rnet_can.lua
+Lua dissector for the R-Net CAN protocol. Decodes frames in pcap/pcapng
+captures (and candump `.log` files, which Wireshark parses natively)
+into structured semantic fields — joystick, battery, faults, mode
+configuration, the POP wire format with full ODI class decoding and
+embedded CRC validation, etc.
+
+```bash
+# Inline against the hackathon capture:
+tshark -X lua_script:analysis/wireshark/rnet_can.lua -V \
+       -r captures/2026_AT_hackathon.log
+
+# Or filter on dissected fields:
+tshark -X lua_script:analysis/wireshark/rnet_can.lua \
+       -r captures/2026_AT_hackathon.log -Y "rnet.auth.network"
+
+# Live, dissected output — the equivalent of `candump can0 -L`:
+tshark -X lua_script:analysis/wireshark/rnet_can.lua \
+       -i can0 -l -T fields -e frame.time_relative -e _ws.col.info
+```
+
+See `analysis/wireshark/README.md` for the full field reference,
+evidence policy, and the optional `reassemble_transfers.py` companion
+that turns POP TEXT segments into reconstructed chair-UI strings.
+
 ## Logic Analyzer Tools
 
 ### saleae_csv_parser.py
