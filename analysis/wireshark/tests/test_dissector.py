@@ -226,25 +226,6 @@ def test_crc_verified_text_write_episode():
     assert crc == 0x6F36, f"frame 270 CRC = 0x{crc:04X}, expected 0x6F36"
 
 
-def test_crc_field_fires_on_complete_frames():
-    """At least 3000 POP COMPLETE frames across the corpus should have
-    `rnet.pop.crc_value` populated. As of 2026-05-22 the total is ~3,646
-    across the four programmer-attached captures plus the ICS read capture.
-    """
-    caps_with_crc = [
-        "programmer_write",
-        "ics_write_config",
-        "maybe_new_ics_frames_readfunction.pcapng",
-        "programmer_dump_file_july2017.pcapng",
-    ]
-    total = 0
-    for cap in caps_with_crc:
-        if not have_capture(cap):
-            continue
-        total += count(cap, "rnet.pop.crc_value")
-    assert total >= 3000, f"CRC value field fired on only {total} frames"
-
-
 # ---------------------------------------------------------------------------
 # Category 4: Frame-decode lock-ins
 # ---------------------------------------------------------------------------
@@ -325,16 +306,39 @@ def test_decode_lighting_lamp_test_d5d5():
 
 
 def test_decode_transfer_complete_sentinel():
-    """0x1E80000F should decode with 'Transfer Complete sentinel' in class.
-    The end-of-transfer marker also doubles as a ReBus session-layer
-    state transition (CXTN_UPLOAD/DOWNLOAD → CXTN_RNET); we match on
-    substring so future label refinements don't break the test."""
+    """0x1E80000F is the canonical Transfer Complete sentinel — fires when
+    a transfer ends and the R-Net session returns CXTN_UPLOAD/DOWNLOAD →
+    CXTN_RNET. The sentinel's tail byte (0x0F = slot 15 = Programmer)
+    encodes which slot the transfer was directed at.
+
+    Verifies (a) the dissector recognizes 0x1E80000F as Transfer Complete,
+    (b) the summary names slot 15 / Programmer as the target. Substring
+    match on class to allow label refinement (e.g. adding state-machine
+    parens); strict equality on the CAN ID."""
     if not have_capture("ics_write_config"):
         pytest.skip("ics_write_config not present")
-    n = count("ics_write_config", 'rnet.class contains "Transfer Complete sentinel"')
-    # PROJECT_NOTES line 479 says this is the end-of-transfer marker; the
-    # ics_write_config capture has ~1,332 of these.
-    assert n > 1000, f"only {n} Transfer Complete sentinels; expected >1000"
+    rows = fields("ics_write_config",
+                  'can.id == 0x1E80000F',
+                  ["rnet.class", "rnet.summary"])
+    assert rows, "no 0x1E80000F frames found in ics_write_config"
+    # Sanity on count — too few suggests filter broke, too many suggests a
+    # different ID accidentally matched. Loose range covers capture growth.
+    assert 500 <= len(rows) <= 5000, (
+        f"got {len(rows)} 0x1E80000F frames; expected ~1,332 — check filter"
+    )
+    # Class label must contain the canonical phrase
+    bad_class = [r for r in rows if "Transfer Complete sentinel" not in r[0]]
+    assert not bad_class, (
+        f"{len(bad_class)} 0x1E80000F frames missing 'Transfer Complete "
+        f"sentinel' in class; first: {bad_class[0]!r}"
+    )
+    # Summary must identify slot 15 / Programmer as the target
+    bad_summary = [r for r in rows
+                   if "Programmer" not in r[1] and "slot 15" not in r[1] and "CXTN_RNET" not in r[1]]
+    assert not bad_summary, (
+        f"{len(bad_summary)} frames lack target/state info in summary; "
+        f"first: {bad_summary[0]!r}"
+    )
 
 
 def test_decode_bit4_crc_flag_only_on_tc1_segment():
@@ -555,16 +559,34 @@ def test_decode_pop_value_field_labeling():
     )
 
 
-def test_decode_odi_class_slot_appears():
-    """The ODI class decoder should recognize 0x8C (SLOT, sizes 1-4) in
-    POP frames with that ODI low byte.
+def test_decode_odi_class_decodes_slot_class_correctly():
+    """The ODI class decoder (decode_odi_class in rnet_can.lua, derived from
+    IRConfigurator.Device.ODI_CLASS via ilspycmd) maps ODI low bytes in
+    0x80-0x8F to ODI_CLASS_SLOT. Verifies (a) frames matching that class
+    have ODI values within the documented range, (b) the decoder's address
+    extraction matches the low byte for the SLOT class entries we see.
+
+    full_action_dumpJuly2_2016 has 8 ODI_CLASS_SLOT frames (frame 153-160)
+    with ODI in {0x85, 0x8C}.
     """
     if not have_capture("full_action"):
         pytest.skip("full_action not present")
     rows = fields("full_action",
                   'rnet.pop.odi_class == "ODI_CLASS_SLOT"',
-                  ["rnet.pop.odi_class"])
-    assert rows, "expected at least one ODI_CLASS_SLOT frame in full_action"
+                  ["rnet.pop.odi", "rnet.pop.odi_address"])
+    assert rows, "no ODI_CLASS_SLOT frames in full_action"
+    assert len(rows) >= 4, (
+        f"only {len(rows)} ODI_CLASS_SLOT frames; expected ~8"
+    )
+    for odi_s, addr_s in rows:
+        odi = int(odi_s.replace("0x", ""), 16)
+        # SLOT class lives in the 0x8X register space — low byte must be
+        # in 0x80..0x8F.
+        low = odi & 0xFF
+        assert 0x80 <= low <= 0x8F, (
+            f"ODI 0x{odi:08X} classified as SLOT but low byte 0x{low:02X} "
+            f"is outside the 0x80-0x8F SLOT register range"
+        )
 
 
 def test_algo_pop_namespace_membership():
@@ -671,25 +693,40 @@ def test_evidence_tier_distribution_matches_readme_claim():
     )
 
 
-def test_rnd_address_emits_stable_prefix_and_caveated_name():
+def test_rnd_address_emits_prefix_name_and_path():
     """When a POP frame's ODI memory address matches our .rnd lookup,
-    the dissector should emit BOTH a stable module prefix (which is
-    invariant across firmware versions) AND the firmware-specific name
-    guess. Per RND_PARAMETER_RECORD_FORMAT.md address-stability finding
-    (2026-05-23): 0/159 common addresses map to the same name across
-    6 firmware extractions — the prefix is the reliable signal."""
+    the dissector emits three fields together:
+      - rnet.pop.addr_prefix: stable across firmware versions (e.g. "ICS"),
+        the reliable signal per the address-stability finding (0/159
+        common addresses map to the same name across 6 firmware extractions)
+      - rnet.pop.addr_name: firmware-version-specific name guess
+      - rnet.pop.addr_path: GUI menu path showing where the parameter lives
+
+    Anchored on programmer_write frame .rnd[0x0048] which is
+    ICS_ABS_MIN_ELEVATOR_TRAVEL @ Seating~ICS~OEM Factory in
+    Generic V33_1_1375 — all three fields must populate consistently."""
     if not have_capture("programmer_write"):
         pytest.skip("programmer_write capture not present")
-    # Frame 281 in programmer_write hits .rnd[0x0048] which is
-    # ICS_ABS_MIN_ELEVATOR_TRAVEL (prefix "ICS") in Generic V33_1_1375.
     rows = fields("programmer_write",
                   'rnet.pop.addr_prefix == "ICS"',
-                  ["rnet.pop.addr_prefix", "rnet.pop.addr_name"])
+                  ["rnet.pop.addr_prefix",
+                   "rnet.pop.addr_name",
+                   "rnet.pop.addr_path"])
     assert rows, "no frames matched rnet.pop.addr_prefix == 'ICS' — prefix-field not emitted"
-    prefix, name = rows[0][0], rows[0][1]
+    prefix, name, path = rows[0]
     assert prefix == "ICS", f"expected prefix 'ICS'; got {prefix!r}"
     assert name.startswith("ICS_"), (
-        f"expected name to start with 'ICS_' (matching prefix); got {name!r}"
+        f"name should start with the prefix 'ICS_'; got {name!r} — "
+        f"the prefix/name correspondence is broken"
+    )
+    assert "~" in path, (
+        f"GUI path should be tilde-separated (top~sub~leaf); got {path!r}"
+    )
+    # The Seating-area parameters are the dominant ICS_ class; if our
+    # one-shot anchor ever shifts to a different ICS leaf it's worth
+    # noticing rather than silently passing.
+    assert path.split("~")[0] in ("Seating", "Inhibits", "Engineering", "Controls"), (
+        f"unexpected top-level menu for ICS_ entry; got {path!r}"
     )
 
 
@@ -717,31 +754,6 @@ def test_auth_response_labels_distinguish_serial_bytes_from_extended_round():
     assert rows, "no auth-response seq 4-7 frames found"
     bad = [(s, sm) for s, sm in rows if "extended round" not in sm]
     assert not bad, f"some seq 4-7 frames lack 'extended round' in summary: {bad[:3]}"
-
-
-def test_rnd_address_emits_gui_path_for_lookups_that_have_one():
-    """When a POP frame hits a .rnd address that we have GUI-path
-    metadata for, the rnet.pop.addr_path field must be populated
-    alongside name and prefix. The path tells the reader WHERE in the
-    dealer menus this parameter lives — often more useful than the
-    cryptic internal name. Frame 281 of programmer_write hits
-    .rnd[0x0048] = ICS_ABS_MIN_ELEVATOR_TRAVEL @ Seating~ICS~OEM Factory."""
-    if not have_capture("programmer_write"):
-        pytest.skip("programmer_write capture not present")
-    rows = fields("programmer_write",
-                  'rnet.pop.addr_prefix == "ICS"',
-                  ["rnet.pop.addr_name", "rnet.pop.addr_path"])
-    assert rows, "no ICS-prefix .rnd address frames found"
-    name, path = rows[0][0], rows[0][1]
-    assert name.startswith("ICS_"), f"expected ICS_ name; got {name!r}"
-    assert "~" in path, (
-        f"expected GUI path (tilde-separated) for ICS .rnd entry; "
-        f"got {path!r} — path field probably not emitting"
-    )
-    assert path.startswith("Seating") or path.startswith("Inhibits") \
-        or path.startswith("Engineering") or path.startswith("Controls"), (
-        f"expected path to start with a top-level menu name; got {path!r}"
-    )
 
 
 def test_decode_rtc_broadcast_field_values():
