@@ -5,6 +5,47 @@ A Lua dissector for the **R-Net** power-wheelchair control protocol
 Decodes SocketCAN-encapsulated frames in pcap/pcapng captures and
 `candump -L` logs.
 
+## What this is, honestly
+
+**R-Net is not open.** There is no public specification. Curtiss-Wright
+(formerly PG Drives Technology) doesn't publish wire documentation, and
+the dealer Programmer that configures chairs ships as a stripped,
+encrypted binary. We're dissecting a protocol whose spec we don't have.
+
+What we DO have:
+
+- **A lot of wire traffic** — hundreds of thousands of CAN frames
+  across 18 DEFCON-24-era captures plus a 31,043-frame hackathon dump.
+  Whatever the spec is, the wire actually does this — observable,
+  reproducible, cross-checkable.
+- **The software that generates and receives R-Net messages.** The
+  dealer Programmer DLL (`DongleInterface.dll`) and companion app
+  (`IRConfigurator.exe`) have been decompiled. Interpreting binaries
+  is hard — names get inferred, control flow is partial, some things
+  remain opaque — but we've made solid progress recovering class
+  structures, wire formats, and named constants.
+- **Prior reverse-engineering** — the DEFCON 24 talk, the runnable
+  `rnet_utils.py` decoder, and community-contributed dictionaries.
+
+What we DON'T have:
+
+- The spec
+- Vendor acknowledgment of any of the names or structures we use
+- Decompiles of most chair-side firmware modules
+
+Some claims in this dissector are well-grounded — code we can read,
+traffic we can reproduce, empirical cross-checks against multiple
+captures. Others are educated guesses from patterns and adjacent
+neighbors. The `rnet.confidence` field (see "Evidence policy" below)
+tells you which is which on a per-rule basis. Today the rules break
+down as **49% Code, 27% Documented, 24% Inferred** — we try to be
+honest about that uncertainty so you can decide what to trust.
+
+**If you can help, especially with new capture logs, please do.** See
+"Contributing" near the bottom — logs that demonstrate a wrong decode
+(or a correct-but-better one) are the single highest-leverage thing
+anyone can send us.
+
 ## Quick start (no install)
 
 From the repo root, against the hackathon capture that ships with this
@@ -504,3 +545,37 @@ analysis/wireshark/
 - Later RE work on the Programmer dongle DLL and IRConfigurator
   companion app — surfaced the POP wire format, ODI class encoding,
   CRC algorithm, and parameter address layouts cited throughout.
+
+## Contributing
+
+Without the spec, the way this dissector gets better is **more
+captures and more eyes on the decodes**. Specific high-leverage
+things you can send:
+
+1. **Capture logs**, ideally with context — what chair/modules were
+   on the bus, what you were doing during the capture (driving,
+   programming, lamp test, sleeping). `.pcapng` from Wireshark,
+   `candump -L` text logs, or raw SocketCAN dumps all work. Captures
+   from chairs/modules not yet in the corpus (Pride, SwitchIt, HMC,
+   newer Permobil) are especially valuable.
+
+   Even if you can't share a capture publicly, a private trace plus
+   a description of what was happening helps us re-test
+   `Inferred`-tier decodes.
+
+2. **Corrections to wrong decodes.** If a frame is mislabeled or
+   under-decoded — especially anything tagged `rnet.confidence ==
+   "Inferred"` — open an issue or PR with the better interpretation.
+   Pair the change with a test case in `tests/test_dissector.py`
+   that pins down the new behavior.
+
+3. **Tier promotions.** Any decode that moves up
+   `Inferred → Documented → Code` because someone found a community
+   dictionary entry, decompiled a chair module, or empirically
+   verified a structural hypothesis against a real capture is a real
+   improvement — even without adding new field names.
+
+Submissions that come with **a log file that demonstrates the
+change** are the highest-value form. The log proves the claim and
+becomes a regression test for future work touching the same code
+path.
