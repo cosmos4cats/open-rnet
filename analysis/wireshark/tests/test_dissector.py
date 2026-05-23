@@ -619,6 +619,28 @@ def test_evidence_tier_distribution_is_documented():
     )
 
 
+def test_rnd_address_emits_stable_prefix_and_caveated_name():
+    """When a POP frame's ODI memory address matches our .rnd lookup,
+    the dissector should emit BOTH a stable module prefix (which is
+    invariant across firmware versions) AND the firmware-specific name
+    guess. Per RND_PARAMETER_RECORD_FORMAT.md address-stability finding
+    (2026-05-23): 0/159 common addresses map to the same name across
+    6 firmware extractions — the prefix is the reliable signal."""
+    if not have_capture("programmer_write"):
+        pytest.skip("programmer_write capture not present")
+    # Frame 281 in programmer_write hits .rnd[0x0048] which is
+    # ICS_ABS_MIN_ELEVATOR_TRAVEL (prefix "ICS") in Generic V33_1_1375.
+    rows = fields("programmer_write",
+                  'rnet.pop.addr_prefix == "ICS"',
+                  ["rnet.pop.addr_prefix", "rnet.pop.addr_name"])
+    assert rows, "no frames matched rnet.pop.addr_prefix == 'ICS' — prefix-field not emitted"
+    prefix, name = rows[0][0], rows[0][1]
+    assert prefix == "ICS", f"expected prefix 'ICS'; got {prefix!r}"
+    assert name.startswith("ICS_"), (
+        f"expected name to start with 'ICS_' (matching prefix); got {name!r}"
+    )
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))

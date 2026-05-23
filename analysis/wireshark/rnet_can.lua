@@ -103,7 +103,8 @@ local pf = {
     pop_ptr_sub   = ProtoField.uint8 ("rnet.pop.pointer_sub", "Pointer sub-index (data[6])", base.HEX),
     pop_ptr_pid   = ProtoField.uint16("rnet.pop.pointer_param_id", "Permobil PWC param_id (sub<<8 | idx)", base.DEC),
     pop_ptr_name  = ProtoField.string("rnet.pop.param_name",  "Parameter name (registry cross-reference)"),
-    pop_addr_name = ProtoField.string("rnet.pop.addr_name",   "Parameter name (.rnd memory-address lookup)"),
+    pop_addr_name   = ProtoField.string("rnet.pop.addr_name",   "Parameter name (.rnd, firmware-specific guess — see prefix for stable taxonomy)"),
+    pop_addr_prefix = ProtoField.string("rnet.pop.addr_prefix", "Parameter module prefix (.rnd, stable across firmware versions)"),
     pop_size      = ProtoField.uint32("rnet.pop.size",       "Size (24-bit LE)", base.DEC),
     pop_block     = ProtoField.uint8 ("rnet.pop.block",      "Block (segment-block counter)", base.DEC),
     pop_segment   = ProtoField.uint16("rnet.pop.segment",    "SegmentNumber (extended-ID POP)", base.DEC),
@@ -748,20 +749,33 @@ local function decode_pop_std(tvb, t, cid)
             end
             -- .rnd memory-address fallback: when ODI is NOT a register
             -- opcode (data[1] not 0x80-0x8F with zero upper bytes) and
-            -- data[3]=0, treat data[1..2] as a 16-bit memory address and
-            -- look it up in the .rnd parameter table. The hit rate is
-            -- low (~14%) and ODI_CLASS isn't yet disambiguated, but the
-            -- hits that do land are semantically coherent (consecutive
-            -- channel/button parameters). Only fires when no reg_name
-            -- was already assigned, so it never overrides register-based
-            -- labels.
+            -- data[3]=0, treat data[1..2] as a 16-bit memory address.
+            --
+            -- IMPORTANT: wire addresses are firmware-version-specific
+            -- (RND_PARAMETER_RECORD_FORMAT.md, address-stability test:
+            -- of 159 addresses common across 6 firmware extractions,
+            -- ZERO map to the same internal_name across them). The
+            -- specific NAME is a Generic-firmware guess; the PREFIX
+            -- (substring before first underscore) is stable across
+            -- firmwares and is the reliable signal.
+            -- Only fires when no reg_name was already assigned.
             if reg_name == nil and tvb(3,1):uint() == 0 then
                 local cand = tvb(1,1):uint() + tvb(2,1):uint() * 256
                 if cand ~= 0 then
                     local addr_name = rnd_address_names[cand]
                     if addr_name then
+                        local prefix = addr_name:match("^([A-Z]+)_")
                         t:add(pf.pop_addr_name, addr_name):set_generated()
-                        reg_name = string.format(".rnd[0x%04X]=%s", cand, addr_name)
+                        if prefix then
+                            t:add(pf.pop_addr_prefix, prefix):set_generated()
+                            reg_name = string.format(
+                                ".rnd[0x%04X] %s module (Generic-fw guess: %s)",
+                                cand, prefix, addr_name)
+                        else
+                            reg_name = string.format(
+                                ".rnd[0x%04X]=%s [Generic-fw guess]",
+                                cand, addr_name)
+                        end
                     end
                 end
             end
@@ -3403,9 +3417,17 @@ pwc_params = {
 -- Hit rate: 5/35 (14%) on 4-capture corpus — sparse because most
 -- ODIs in the corpus aren't real parameter addresses, but the
 -- hits that do land are real (consecutive Amy/SCX channels etc).
--- ODI_CLASS device-class disambiguation still TBD (limitation
--- #5 in RND_PARAMETER_RECORD_FORMAT.md) — names here are
--- best-effort across both Generic+Amylior namespaces.
+--
+-- !! Firmware-version caveat (RND_PARAMETER_RECORD_FORMAT.md address-
+-- stability test, 2026-05-23): of 159 addresses common across 6
+-- firmware extractions, ZERO map to the same internal_name. Same
+-- wire address can be `ICS_ELEVATOR_DRV_INHIBIT_HEIGHT` on one
+-- chair and `PG_ID_ONLY` on another. The names below are the
+-- Generic V33_1_1375 (+ Amylior) mappings — STABLE part of each
+-- name is the prefix before the first underscore (`ICS`, `PPP`,
+-- `SCX`, etc.) which IS invariant across firmwares and identifies
+-- the emitting module. The dissector emits both the full name
+-- (firmware-specific guess) and the prefix (stable taxonomy).
 rnd_address_names = {
     [7] = "SPEED_START_ACCEL",
     [15] = "INDICATOR_FAULT_POWER",
