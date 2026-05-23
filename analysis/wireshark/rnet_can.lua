@@ -1250,14 +1250,16 @@ local function decode_xtd(tvb, t, cid, is_rtr)
     elseif bit.band(cid, 0xFFFFFF00) == 0x1FB00000 then
         return decode_device_enum(tvb, t, cid)
     elseif cid == 0x1E80000F then
-        -- Transfer Complete sentinel — end of POP-extended segmented config-
-        -- write. Zero-payload (DLC=0); the information IS the ID. Outside
-        -- the POP-extended namespace by design (it's a protocol-control
-        -- marker, not a POP message).
+        -- Transfer Complete sentinel — signals the ReBus session-layer
+        -- transition CXTN_UPLOAD/DOWNLOAD → CXTN_RNET. Marks the end of
+        -- a POP-extended segmented transfer; zero-payload (DLC=0), the
+        -- information IS the ID. Outside the POP-extended namespace by
+        -- design (it's a session-layer protocol-control marker, not a
+        -- POP application message).
         -- Evidence: extract_config_data.py:68-69 (literal handler);
-        -- RNET_PROTOCOL_SPECIFICATION.md §1059; PROJECT_NOTES.md:479.
-        t:add(pf.class, "Transfer Complete sentinel")
-        t:add(pf.summary, "End-of-transfer marker (Programmer)")
+        -- DongleInterface.dll wire-format §1059; RNET_PROTOCOL_LAYER_MAP.md.
+        t:add(pf.class, "Transfer Complete sentinel (ReBus UPLOAD/DOWNLOAD → RNET)")
+        t:add(pf.summary, "Transfer complete — ReBus returns to CXTN_RNET")
         add_evidence(t, "Code", "extract_config_data.py:68-69 + DongleInterface.dll wire-format §1059")
         return "XferDone"
     elseif bit.band(bit.rshift(cid, 18), 0x7E0) == 0x780 then
@@ -1496,22 +1498,24 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         add_evidence(t, "Inferred", "hackathon-only observation, no corpus citation")
         return "Event"
     elseif bit.band(cid, 0xFFF00000) == 0x1E800000 then
-        -- 0x1E8X = Programmer protocol-control sentinel namespace.
-        -- Outside POP-ext: `(0x1E8X >> 18) & 0x7E0 = 0x7A0 ≠ 0x780`.
+        -- 0x1E8X = ReBus session-layer protocol-control namespace.
+        -- POP (application layer) runs on top of ReBus (session layer);
+        -- this is where ReBus state-machine transitions show up on the
+        -- wire. Outside POP-ext: `(0x1E8X >> 18) & 0x7E0 = 0x7A0 ≠ 0x780`.
         --
         -- subtype = bits 18-16 (top nibble after the 0x8):
-        --   N=0  → Transfer Complete; low nibble of tail = target slot
-        --          (0x1E80000F = slot 15 = Programmer)
-        --   N=4-7 → 4-frame Programmer-to-chair attach handshake (per
-        --           POP_FRAME_FAMILY_DECODES_2026-05-23.md, EVIDENCED).
+        --   N=0   → Transfer Complete; CXTN_UPLOAD/DOWNLOAD → CXTN_RNET.
+        --           Low nibble of tail = target slot (0x000F = Programmer).
+        --   N=4-7 → 4-frame chair-attach handshake (CXTN_CAN → CXTN_RNET).
         --           Fires within ~4ms at chair-attach time, before any
         --           Transfer Complete. Same chair across years produces
         --           identical N=6 and N=7 low-16-bit fingerprints.
+        --           Evidenced in POP_FRAME_FAMILY_DECODES_2026-05-23.md.
         local subtype = bit.band(bit.rshift(cid, 16), 0xF)
         local tail = bit.band(cid, 0xFFFF)
         local label, summary, conf, src
         if subtype == 0 then
-            label = "Transfer Complete sentinel"
+            label = "Transfer Complete sentinel (ReBus CXTN_UPLOAD/DOWNLOAD → CXTN_RNET)"
             if tail == 0x000F then
                 summary = "Transfer Complete → Programmer (slot 15)"
             else
@@ -1519,24 +1523,24 @@ local function decode_xtd(tvb, t, cid, is_rtr)
             end
             conf, src = "Code", "extract_config_data.py:68-69 + DongleInterface.dll wire-format §1059"
         elseif subtype == 4 then
-            label = "Attach handshake step 1 (Programmer announce)"
-            summary = "Attach handshake 1/4 — Programmer announce"
-            conf, src = "Documented", "POP_FRAME_FAMILY_DECODES_2026-05-23.md (4-frame attach handshake)"
+            label = "ReBus attach handshake step 1 (Programmer announce)"
+            summary = "ReBus attach 1/4 — Programmer announce (CXTN_CAN→CXTN_RNET begin)"
+            conf, src = "Documented", "POP_FRAME_FAMILY_DECODES_2026-05-23.md + RNET_PROTOCOL_LAYER_MAP.md"
         elseif subtype == 5 then
-            label = "Attach handshake step 2 (chair ack)"
-            summary = "Attach handshake 2/4 — chair ack"
-            conf, src = "Documented", "POP_FRAME_FAMILY_DECODES_2026-05-23.md (4-frame attach handshake)"
+            label = "ReBus attach handshake step 2 (chair ack)"
+            summary = "ReBus attach 2/4 — chair ack"
+            conf, src = "Documented", "POP_FRAME_FAMILY_DECODES_2026-05-23.md + RNET_PROTOCOL_LAYER_MAP.md"
         elseif subtype == 6 then
-            label = "Attach handshake step 3 (chair fingerprint #1)"
-            summary = string.format("Attach handshake 3/4 — chair fingerprint #1 = 0x%04X", tail)
+            label = "ReBus attach handshake step 3 (chair fingerprint #1)"
+            summary = string.format("ReBus attach 3/4 — chair fingerprint #1 = 0x%04X", tail)
             conf, src = "Documented", "POP_FRAME_FAMILY_DECODES_2026-05-23.md (per-chair persistent identifier)"
         elseif subtype == 7 then
-            label = "Attach handshake step 4 (chair fingerprint #2)"
-            summary = string.format("Attach handshake 4/4 — chair fingerprint #2 = 0x%04X", tail)
+            label = "ReBus attach handshake step 4 (chair fingerprint #2)"
+            summary = string.format("ReBus attach 4/4 — chair fingerprint #2 = 0x%04X (CXTN_RNET ready)", tail)
             conf, src = "Documented", "POP_FRAME_FAMILY_DECODES_2026-05-23.md (per-chair persistent identifier)"
         else
-            label = string.format("0x1E8X sentinel (N=%d) [unverified]", subtype)
-            summary = string.format("Sentinel N=%d tail=0x%04X (subtype semantics TBD)", subtype, tail)
+            label = string.format("0x1E8X ReBus sentinel (N=%d) [unverified]", subtype)
+            summary = string.format("ReBus sentinel N=%d tail=0x%04X (subtype semantics TBD)", subtype, tail)
             conf, src = "Inferred", "POP 0x1E8X sentinel namespace — subtype N=1-3 not yet observed"
         end
         t:add(pf.class, label)

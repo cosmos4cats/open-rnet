@@ -310,10 +310,13 @@ def test_decode_lighting_lamp_test_d5d5():
 
 
 def test_decode_transfer_complete_sentinel():
-    """0x1E80000F should decode as 'Transfer Complete sentinel'."""
+    """0x1E80000F should decode with 'Transfer Complete sentinel' in class.
+    The end-of-transfer marker also doubles as a ReBus session-layer
+    state transition (CXTN_UPLOAD/DOWNLOAD → CXTN_RNET); we match on
+    substring so future label refinements don't break the test."""
     if not have_capture("ics_write_config"):
         pytest.skip("ics_write_config not present")
-    n = count("ics_write_config", 'rnet.class == "Transfer Complete sentinel"')
+    n = count("ics_write_config", 'rnet.class contains "Transfer Complete sentinel"')
     # PROJECT_NOTES line 479 says this is the end-of-transfer marker; the
     # ics_write_config capture has ~1,332 of these.
     assert n > 1000, f"only {n} Transfer Complete sentinels; expected >1000"

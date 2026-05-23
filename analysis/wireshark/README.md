@@ -313,6 +313,42 @@ tshark -o rnet.show_evidence:TRUE \
        -r capture.pcapng -Y 'rnet.confidence == "Code"'
 ```
 
+## Protocol layering
+
+R-Net is a four-layer stack. Knowing which layer a frame belongs to
+makes the rest of the dissector's labels make sense.
+
+```
+Layer 4  — POP (Parameter Object Protocol) — application
+                  parameter reads/writes, transfers, the bulk of what
+                  this dissector decodes per-frame.
+Layer 3  — ReBus — session
+                  PGDT's session-layer protocol. State machine
+                  (CXTN_NONE → CXTN_CAN → CXTN_RNET →
+                   CXTN_UPLOAD/DOWNLOAD). Carries the chair-attach
+                  4-frame handshake (0x1E84/85/86/87), the auth
+                  exchange, the chair-serial heartbeat, and the
+                  Transfer Complete sentinel (0x1E80000F).
+Layer 2  — CAN-ID namespace
+                  STD vs XTD; per-CAN-ID-prefix decoding rules
+                  (POP-std 0x780-0x79F, POP-ext 0x1E0..0x1E7,
+                  ReBus 0x1E8X, application 0x14XX/0x1CXX/etc.).
+Layer 1  — CAN 2.0B physical @ 125 kbit/s
+                  Standard automotive CAN, up to 15 modules per bus.
+```
+
+A few labels in the dissector reference these layers explicitly:
+
+- `ReBus attach handshake step 1..4` on 0x1E84..87 frames
+- `Transfer Complete sentinel (ReBus CXTN_UPLOAD/DOWNLOAD → CXTN_RNET)`
+  on 0x1E80000F
+- `POP std` / `POP ext` for application-layer frames
+
+For a deeper picture of the session-layer state transitions in a
+specific capture (when each transfer opens, completes, and returns
+to idle), see the `rebus_state_timeline.py` companion tool in the
+underlying R-Net research repository.
+
 ## POP frames — the structural decode
 
 A previous version of this dissector treated POP "byte 0" as a flat
