@@ -334,7 +334,16 @@ Concretely:
   reflects this distinction.
 - **POP is NOT a layer above ReBus.** It's the wire format ReBus
   serializes its operations into. ReBus → uses CPOPMsg → rides on
-  CCANMsg → CAN 2.0B physical.
+  CCANMsg → CAN 2.0B physical. The smoking-gun evidence:
+  `CRebusInterface::Download` (decompile at `DongleInterface.dll`
+  offset `0x10008300`) literally calls `CPOPMsg::CPOPMsg()` to
+  construct a POP message, sets its ODI / Size / CRC fields, hands
+  it to `CTransactionBase`, and sends it via `CFTDIInterface::TxCANMsg`.
+  ReBus is the caller; POP is the wire format. This relationship is
+  cross-validated against four independent code sources (v5 + v6
+  DLL symbol dumps, the Programmer EXE which instantiates both
+  classes, and the Download decompile itself) and has been stable
+  in the binary since 2013.
 - **The R-Net session state machine** (`CXTN_NONE → CXTN_CAN →
   CXTN_RNET → CXTN_UPLOAD/CXTN_DOWNLOAD`) lives on
   `CRnetInterface`, not on `CRebusInterface`. The chair-attach
@@ -347,6 +356,16 @@ PGDT marketing/dealer material uses "ReBus" loosely to mean "the
 R-Net protocol" — that's not wrong at the dealer-facing level of
 abstraction, but it conflates the umbrella class with one of its
 components. This dissector uses the engineering-precise meaning.
+
+> **Known discrepancy with this repo's `docs/POP_PROTOCOL.md`.**
+> The 2026 protocol spec (and its layered-stack diagram) presents
+> POP as "operating on top of REBUS." Per the four-source code
+> validation above — particularly the `CRebusInterface::Download`
+> decompile — the relationship is the opposite: ReBus constructs
+> and emits POP messages. The dissector's labels follow the
+> code-verified model. A spec update to match is a separate
+> follow-up; the discrepancy is documented here so reviewers
+> don't conclude the dissector's labels are wrong.
 
 A few labels in the dissector reference these distinctions explicitly:
 
