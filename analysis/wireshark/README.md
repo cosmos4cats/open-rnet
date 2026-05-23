@@ -2,38 +2,89 @@
 
 A Lua dissector for the **R-Net** power-wheelchair control protocol
 (Curtiss-Wright / PG Drives Technology), running on 125 kbit/s CAN.
-Decodes SocketCAN-encapsulated frames in pcap/pcapng captures.
+Decodes SocketCAN-encapsulated frames in pcap/pcapng captures and
+`candump -L` logs.
 
-## Usage
+## Quick start (no install)
 
 From the repo root, against the hackathon capture that ships with this
 dissector:
 
 ```sh
-# Inline (no install required) — works on both pcap/pcapng AND candump logs:
 tshark -X lua_script:analysis/wireshark/rnet_can.lua -V \
        -r captures/2026_AT_hackathon.log
+```
 
-# Same against a DEFCON 24 capture:
-tshark -X lua_script:analysis/wireshark/rnet_can.lua -V \
-       -r captures/poweronJSMsh.pcap.pcapng
+That works without installing anything — `-X lua_script:` loads the
+dissector for that single invocation. Same flag works with the
+Wireshark GUI:
 
-# Filter on dissected fields:
-tshark -X lua_script:analysis/wireshark/rnet_can.lua \
-       -r captures/2026_AT_hackathon.log -Y "rnet.joy.x"
-tshark -X lua_script:analysis/wireshark/rnet_can.lua \
-       -r captures/2026_AT_hackathon.log -Y "rnet.pop.tc == 3"
-tshark -X lua_script:analysis/wireshark/rnet_can.lua \
-       -r captures/2026_AT_hackathon.log -Y "rnet.mode.index < 6"
-
-# Or open with Wireshark GUI:
+```sh
 wireshark -X lua_script:analysis/wireshark/rnet_can.lua \
           captures/2026_AT_hackathon.log
 ```
 
-If you've installed the dissector to your Wireshark plugin path
-(`~/.local/lib/wireshark/plugins/` on Linux/macOS), drop the
-`-X lua_script:...` flag and just point at the capture.
+For repeated use, install the file once into your Wireshark plugin
+directory (next section) and drop the `-X lua_script:...` flag.
+
+## Installation
+
+Copy `rnet_can.lua` into your Wireshark personal plugins directory.
+The directory is the same for `tshark` and the `wireshark` GUI — they
+share the plugin store.
+
+| OS              | Plugin path                                                          |
+|-----------------|----------------------------------------------------------------------|
+| Linux           | `~/.local/lib/wireshark/plugins/`                                    |
+| macOS           | `~/.local/lib/wireshark/plugins/`                                    |
+| Windows         | `%APPDATA%\Wireshark\plugins\`                                       |
+
+```sh
+# Linux / macOS:
+mkdir -p ~/.local/lib/wireshark/plugins
+cp analysis/wireshark/rnet_can.lua ~/.local/lib/wireshark/plugins/
+```
+
+Restart Wireshark (or run `tshark` afresh) and the dissector loads
+automatically. Verify in Wireshark: **Help → About → Plugins** should
+list `rnet_can.lua`.
+
+You can confirm from the command line by running `tshark` against a
+capture without any `-X` flag and looking for `R-Net` in the output:
+
+```sh
+tshark -r captures/2026_AT_hackathon.log | head -3
+#   1   0.000000  ... R-Net 16 [NetTest] ID=0xC
+```
+
+If you see `R-Net` in the protocol column, the plugin is loaded.
+
+### Uninstall
+
+Delete `rnet_can.lua` from the same plugin directory and restart
+Wireshark.
+
+## Usage
+
+### Filter on dissected fields
+
+The dissector adds an `rnet.*` field namespace. Every field shown in
+the expanded frame detail is filterable:
+
+```sh
+tshark -r captures/2026_AT_hackathon.log -Y "rnet.joy.x > 30"
+tshark -r captures/2026_AT_hackathon.log -Y "rnet.pop.tc == 3"
+tshark -r captures/2026_AT_hackathon.log -Y "rnet.mode.index < 6"
+tshark -r captures/2026_AT_hackathon.log -Y "rnet.err.code"          # non-zero faults
+tshark -r captures/2026_AT_hackathon.log -Y "rnet.auth.network"       # identified XOR networks
+tshark -r captures/2026_AT_hackathon.log -Y 'rnet.pop.reg_name == "TEXT"'
+```
+
+Same filters work in Wireshark GUI — use the display-filter bar at
+the top.
+
+(If you haven't installed the plugin, prepend
+`-X lua_script:analysis/wireshark/rnet_can.lua` to each command.)
 
 ### `rnet-dump` — candump-L-shaped output with decode
 
@@ -124,30 +175,102 @@ R-Net's protocol has been reverse-engineered in three streams:
 This dissector takes (1) as its spine for general control frames and
 (3) as its spine for the POP (Parameter Object Protocol) wire format.
 
-### Evidence-kind labels (off by default)
+### Evidence-kind labels
 
-When you want to audit a decode, enable the `Show evidence + confidence`
-preference (Edit → Preferences → Protocols → RNET, or
-`-o rnet.show_evidence:TRUE` in tshark). Each frame then carries two
-generated fields:
+Every decode rule in the dissector is tagged with **how it was derived**.
+The labels are hidden by default — most readers want to see the
+protocol, not audit it — but a one-click preference reveals them
+alongside the source citation when you want to verify a claim.
 
-- **`rnet.confidence`** — one of:
-  - **Code** — runnable decoder code in this repo, Ghidra decompile of
-    the DLL that drives the protocol, or empirical cross-validation
-    (XOR-table match, 500/500 fingerprint match).
-  - **Documented** — a single documented source (community dictionary,
-    one Ghidra finding without cross-corroboration).
-  - **Inferred** — family-analogy from a documented neighbor, structural
-    hypothesis, conjectural positional pairing, or hackathon-only
-    observation. Treat as a hint, not a fact.
+#### The three labels
 
-- **`rnet.evidence`** — the raw source citation
-  (`rnet_utils.py:330`, `janschu99 RNETdictionary.txt:13`,
-  `DongleInterface.dll CPOPMsg class (Ghidra)`, etc.).
+- **`Code`** — derived from primary, verifiable sources:
+  - Runnable decoder code in this repo (`rnet_utils.py`, `JoyLocal.py`)
+    that has been used live against real captures
+  - Ghidra decompile of the DLL artifact that actually drives the
+    protocol (`DongleInterface.dll`, `IRConfigurator.exe`)
+  - Empirical cross-validation across many captured frames
+    (XOR-table match against a known network, 500/500 fingerprint
+    match against a known constant payload)
 
-Off by default because most users want to read the protocol, not audit
-it. The pref also makes `rnet.confidence == "Inferred"` a useful display
-filter for "show me everything the dissector isn't sure about."
+  You can verify these by reading the cited code or re-running the
+  empirical check. Treat as trustworthy.
+
+- **`Documented`** — derived from a single documented source without
+  independent cross-corroboration:
+  - Community dictionary entries (janschu99's `RNETdictionary.txt` /
+    `RNETcanframe_diary.txt` / categorized dictionary)
+  - A single Ghidra finding noted in research notes
+
+  Trustworthy author, careful research, but no second voice has
+  confirmed. Treat as likely-correct; verify if your application
+  depends on it.
+
+- **`Inferred`** — no direct source backs the decode; the rule
+  exists because of one of:
+  - Family-analogy from a documented neighbor (`STD 0x051` decoded
+    like `STD 0x050` because they're adjacent and look structurally
+    similar)
+  - Structural hypothesis from observed bit patterns
+  - Conjectural positional pairing (e.g., the three Meyra `.rnd`
+    error names where the descriptor-to-display pairing isn't yet
+    confirmed)
+  - Hackathon-only observations not yet matched against another
+    source
+
+  Treat as a hint, not a fact. Useful for getting some signal out of
+  otherwise-unknown frames; not a basis for safety-critical code.
+
+#### Current distribution (as of 2026-05-23)
+
+Across 55 evidence-tagged decode rules in the dissector:
+
+| Kind        | Count | %    |
+|-------------|------:|-----:|
+| Code        |    27 | 49%  |
+| Documented  |    15 | 27%  |
+| Inferred    |    13 | 24%  |
+
+These percentages move as research progresses — `Inferred` entries
+tend to become `Documented` or `Code` over time when a wire capture
+or firmware dump confirms a hypothesis. (Counts are per *rule*, not
+per frame; one `Code` rule might cover thousands of frames while one
+`Inferred` rule covers a handful.)
+
+#### Enabling the labels
+
+The labels are off by default. Two equivalent ways to turn them on:
+
+**In Wireshark (GUI):** Edit → Preferences → Protocols → RNET →
+check "Show evidence + confidence" → OK. The setting persists.
+
+**In tshark (CLI):** add `-o rnet.show_evidence:TRUE` to any command:
+
+```sh
+tshark -o rnet.show_evidence:TRUE \
+       -r captures/2026_AT_hackathon.log -V -Y 'frame.number==70'
+```
+
+Each frame's expanded detail will then include two extra fields:
+
+```
+[Evidence kind (Code/Documented/Inferred): Code]
+[Evidence source: rnet_utils.py:279]
+```
+
+To turn off again: uncheck the GUI preference, or omit the `-o` flag.
+
+#### Useful filters once enabled
+
+```sh
+# Everything the dissector isn't sure about:
+tshark -o rnet.show_evidence:TRUE \
+       -r capture.pcapng -Y 'rnet.confidence == "Inferred"'
+
+# Show only well-sourced decodes:
+tshark -o rnet.show_evidence:TRUE \
+       -r capture.pcapng -Y 'rnet.confidence == "Code"'
+```
 
 ## POP frames — the structural decode
 
