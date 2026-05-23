@@ -695,6 +695,35 @@ def test_rnd_address_emits_gui_path_for_lookups_that_have_one():
     )
 
 
+def test_decode_rtc_broadcast_field_values():
+    """0x1C2C0X00 is the chair's Real-Time Clock periodic broadcast
+    (per DongleInterface.dll DecodeRTCBroadcast + Programmer EXE
+    FUN_004a5030, validated against wall-clock 2026-05-21 Thursday).
+
+    Validates the 6-byte bit-packed layout decodes correctly and the
+    day-of-week field (data[3] >> 5) — which can't be guessed from
+    range-fitting heuristics — produces 4 (Thursday) for the
+    hackathon capture's date.
+    """
+    if not have_capture("hackathon"):
+        pytest.skip("hackathon dump not present")
+    rows = fields("hackathon",
+                  'can.id == 0x1C2C0100',
+                  ["rnet.rtc.year", "rnet.rtc.month", "rnet.rtc.day",
+                   "rnet.rtc.dow",  "rnet.rtc.hour", "rnet.rtc.min"])
+    assert rows, "no 0x1C2C0100 RTC frames found"
+    y, m, d, dow, h, mn = rows[0]
+    assert (y, m, d) == ("26", "5", "21"), (
+        f"expected 2026-05-21 (the hackathon date); got 20{y}-{m}-{d}"
+    )
+    assert dow == "4", (
+        f"expected day-of-week=4 (Thursday for 2026-05-21); got dow={dow}"
+    )
+    # Hour and minute should be plausible
+    assert 0 <= int(h) <= 23 and 0 <= int(mn) <= 59, \
+        f"implausible hour/min ({h}:{mn})"
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))

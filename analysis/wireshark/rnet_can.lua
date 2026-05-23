@@ -157,14 +157,17 @@ local pf = {
     auth_valid  = ProtoField.bool  ("rnet.auth.valid",  "Auth response validates against known xor_table"),
     auth_net    = ProtoField.string("rnet.auth.network","Identified xor_table network"),
 
-    -- 0x1C2C0X00 telemetry-burst family [unverified, structure-inferred].
-    -- Pattern observed in 2026-05-21 hackathon candump: 10-frame bursts every
-    -- ~20s with byte 0 as a fast counter and bytes 1-2 as a slow LE u16
-    -- counter, bytes 3-5 constant. Slot byte (bits 11-8 of ID) per the 0x1C
-    -- family convention.
-    tlm_sample   = ProtoField.uint8 ("rnet.tlm.sample",   "Sample counter (byte 0)", base.HEX),
-    tlm_counter  = ProtoField.uint16("rnet.tlm.counter",  "Slow counter (bytes 1-2 LE u16)", base.DEC),
-    tlm_const    = ProtoField.bytes ("rnet.tlm.const",    "Constant tail (bytes 3-5)"),
+    -- 0x1C2C0X00 = Real-Time Clock (RTC) periodic broadcast. Field
+    -- layout recovered from DongleInterface.dll DecodeRTCBroadcast +
+    -- RNet Programmer6 DLR.exe FUN_004a5030 + wall-clock cross-check.
+    -- The bit-packed 6-byte payload carries the chair's wall clock.
+    rtc_sec      = ProtoField.uint8 ("rnet.rtc.sec",      "RTC seconds (data[0] & 0x3F)", base.DEC),
+    rtc_min      = ProtoField.uint8 ("rnet.rtc.min",      "RTC minutes (data[1] & 0x3F)", base.DEC),
+    rtc_hour     = ProtoField.uint8 ("rnet.rtc.hour",     "RTC hour (data[2] & 0x1F)", base.DEC),
+    rtc_day      = ProtoField.uint8 ("rnet.rtc.day",      "RTC day-of-month (data[3] & 0x1F)", base.DEC),
+    rtc_dow      = ProtoField.uint8 ("rnet.rtc.dow",      "RTC day-of-week (data[3] >> 5, 1=Mon..7=Sun)", base.DEC),
+    rtc_month    = ProtoField.uint8 ("rnet.rtc.month",    "RTC month (data[4] & 0x0F, 1-12)", base.DEC),
+    rtc_year     = ProtoField.uint8 ("rnet.rtc.year",     "RTC year offset (data[5] & 0x7F, 0-127; add 2000)", base.DEC),
 
     confidence  = ProtoField.string("rnet.confidence",  "Evidence kind (Code/Documented/Inferred)"),
     evidence    = ProtoField.string("rnet.evidence",    "Evidence source"),
@@ -1309,46 +1312,60 @@ local function decode_xtd(tvb, t, cid, is_rtr)
     elseif bit.band(cid, 0xFFF00000) == 0x1EC00000 then
         return decode_mode_config(tvb, t, cid)
     elseif bit.band(cid, 0xFFFFF0FF) == 0x1C2C0000 then
-        -- 0x1C2C family. Function byte (bits 11-8) discriminates:
-        --   0x0D = "Time of Day, little-endian" per janschu99 dictionary
-        --          (RNETdictionary.txt §1c2c0D00).
-        --   0x01-0x04 = per-slot variants [unverified] — structurally similar
-        --               (DLC=6) but byte semantics may differ per slot. Parse
-        --               R3 hypothesizes a per-module-class telemetry.
+        -- 0x1C2C0X00 — Real-Time Clock (RTC) periodic broadcast.
+        -- Per POP_FRAME_FAMILY_DECODES_2026-05-23.md: recovered from
+        -- DongleInterface.dll DecodeRTCBroadcast (@ 0x1000f8e0,
+        -- called by CServiceManager::ProcessRTC) and independently
+        -- from RNet Programmer EXE FUN_004a5030. Triple-validated
+        -- against the hackathon capture's wall clock (encoded date
+        -- 2026-05-21 with day-of-week=4=Thursday matches the
+        -- capture's actual date).
+        --
+        -- The earlier "telemetry / mod-60 rolling counter"
+        -- interpretation was empirically right about the byte 0
+        -- pattern but semantically wrong — what looked like a
+        -- counter is the seconds field rolling 0..59, with byte 1
+        -- (minutes) incrementing on each wrap.
+        --
+        -- Slot nibble (bits 11-8) is the broadcasting module's
+        -- slot ID (the chair's RTC source; usually whoever has the
+        -- valid clock).
         local fb = bit.band(bit.rshift(cid, 8), 0xF)
         if fb == 0x0D then
-            t:add(pf.class, "Time of Day")
-            if tvb:len() >= 6 then
-                -- LE u48 of the 6 payload bytes
-                local v = 0
-                for i = 5, 0, -1 do v = v * 256 + tvb(i,1):uint() end
-                t:add(pf.summary, string.format(
-                    "Time of Day = 0x%012X (LE, 6 bytes)", v))
-            end
-            add_evidence(t, "Documented", "janschu99 RNETdictionary.txt §1c2c0D00")
-            return "TOD"
+            -- Sub-variant per janschu99 dictionary line §1c2c0D00
+            -- ("Time of Day, little-endian"). Same byte layout as
+            -- the per-slot RTC broadcast; keeping it as a distinct
+            -- label for backward compatibility with users searching
+            -- on "Time of Day".
+            t:add(pf.class, "RTC broadcast (function=0x0D / Time of Day)")
+        else
+            t:add(pf.class, "RTC broadcast (chair real-time clock)")
         end
-        -- Per-slot periodic sample telemetry (DLC=6). Counter +
-        -- constant-tail structure verified empirically across the corpus
-        -- (POP_FRAME_FAMILY_DECODES_2026-05-23.md): the leading bytes form
-        -- a modulo-60 rolling counter (seconds clock pattern, ~1Hz), the
-        -- trailing bytes carry per-session constant sensor data that
-        -- varies with chair motion. Counter-byte position varies per
-        -- slot — slot 1 uses bytes 0-1, slot 2 uses bytes 1-2 — possibly
-        -- reflecting different modules' firmware authors.
-        t:add(pf.class, "0x1C2C telemetry (per-slot sample)")
         t:add(pf.slot, fb)
-        if tvb:len() >= 1 then t:add(pf.tlm_sample,  tvb(0,1)) end
-        if tvb:len() >= 3 then t:add_le(pf.tlm_counter, tvb(1,2)) end
-        if tvb:len() >= 6 then t:add(pf.tlm_const,   tvb(3,3)) end
         if tvb:len() >= 6 then
+            local sec   = bit.band(tvb(0,1):uint(), 0x3F)
+            local min   = bit.band(tvb(1,1):uint(), 0x3F)
+            local hour  = bit.band(tvb(2,1):uint(), 0x1F)
+            local day   = bit.band(tvb(3,1):uint(), 0x1F)
+            local dow   = bit.rshift(tvb(3,1):uint(), 5)
+            local month = bit.band(tvb(4,1):uint(), 0x0F)
+            local year  = bit.band(tvb(5,1):uint(), 0x7F)
+            t:add(pf.rtc_sec,   sec)
+            t:add(pf.rtc_min,   min)
+            t:add(pf.rtc_hour,  hour)
+            t:add(pf.rtc_day,   day)
+            t:add(pf.rtc_dow,   dow)
+            t:add(pf.rtc_month, month)
+            t:add(pf.rtc_year,  year)
+            local dow_names = {[1]="Mon", [2]="Tue", [3]="Wed",
+                               [4]="Thu", [5]="Fri", [6]="Sat", [7]="Sun"}
             t:add(pf.summary, string.format(
-                "0x1C2C[slot=%X] counter+const sample (b0=0x%02X b1-2=%d tail=%02X%02X%02X)",
-                fb, tvb(0,1):uint(), tvb(1,2):le_uint(),
-                tvb(3,1):uint(), tvb(4,1):uint(), tvb(5,1):uint()))
+                "RTC slot=%X  %s %04d-%02d-%02d %02d:%02d:%02d",
+                fb, dow_names[dow] or "?",
+                2000 + year, month, day, hour, min, sec))
         end
-        add_evidence(t, "Documented", "POP_FRAME_FAMILY_DECODES_2026-05-23.md (mod-60 counter + sensor-tail structure)")
-        return "Tlm1C2C"
+        add_evidence(t, "Code", "DongleInterface.dll DecodeRTCBroadcast @ 0x1000f8e0 + Programmer EXE FUN_004a5030 + wall-clock cross-check")
+        return "RTC"
     elseif bit.band(cid, 0xFFFF00FF) == 0x181C0000 then
         -- 0x181C0X00 cJSM/JSM device-class family. Function byte = X.
         --   0x0D = Audio tones (rnet_utils.py:377) — handled above as a
