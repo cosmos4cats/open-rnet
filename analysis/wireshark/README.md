@@ -498,6 +498,112 @@ evidenced + 0.97% `[unverified]` + 0.08% unknown** (the remaining
 25 frames are scattered across 9 different rare IDs, none worth a
 dedicated decoder).
 
+## Reading the output — things that look weird but aren't bugs
+
+A few labels you'll see in real captures that surprise people. None
+are decoder bugs — they're either real protocol behavior or
+explicit-uncertainty markers doing their job.
+
+### `JSM serial heartbeat (pre-init — serial not yet loaded)`
+
+At power-on the JSM emits all-zero serial-heartbeat frames (ID `0x00E`,
+8 bytes of `0x00`) before it loads its serial from EEPROM. This is
+real protocol behavior, not the dissector dropping bytes. Visible in
+`captures/poweronJSMsh.pcap.pcapng`. The chair's actual serial
+appears a few milliseconds later in the auth-response handshake.
+
+### `.rnd[0x0048] ICS module (Generic-fw guess: ICS_ABS_MIN_ELEVATOR_TRAVEL)`
+
+POP frames sometimes carry a wire address that matches a parameter in
+our extracted `.rnd` database. We show both:
+
+- **`ICS module`** — the **prefix**, which is stable across firmware
+  versions. ICS, PPP, SCX, FN, ESP, etc. identify the emitting
+  module. Reliable signal — filter on it via
+  `rnet.pop.addr_prefix == "ICS"`.
+- **`(Generic-fw guess: ICS_ABS_MIN_ELEVATOR_TRAVEL)`** — the
+  **specific parameter name** from our extracted Generic V33_1_1375
+  catalog. **This name is firmware-version-specific** — per the
+  rnet-firmware address-stability study (2026-05-23), of 159 wire
+  addresses common across 6 firmware extractions, zero map to the
+  same name across them. The name is a hint, not ground truth.
+
+If you're decoding traffic from a chair you know is running a
+specific firmware version that we have a catalog for, the
+firmware-version-aware lookup is documented under "Planned" below.
+
+### `[CONJECTURAL: Meyra .rnd descriptor #N positional pairing]`
+
+Three error codes (`0x1C00`, `0x2500`, `0x2E00`) carry a
+`[CONJECTURAL]` tag in their decoded names. These wire codes are
+**confirmed real** (they appear in Meyra's `.rnd` descriptor table)
+but the names assigned to them come from positional pairing with
+Meyra's English error display table — a heuristic, not a verified
+mapping. Same wire code can mean different things on different
+modules. We ship the names with the tag so readers can see "here's
+a candidate, verify before relying."
+
+### `✓ Table B` next to auth-response frames
+
+Means the dissector cryptographically validated the auth-response
+bytes against XOR Table B's key sequence. Auth handshake = the chair
+proving it knows its serial number XOR'd with a per-network key
+table. A `✓` means the math worked out — strong identification of
+which R-Net network the chair belongs to. Tables A through D are
+documented in `rnet_can.lua`; B is by far the most common (M300
+networks).
+
+### `[unverified]` vs `[CONJECTURAL]`
+
+Both flag uncertainty, in different ways:
+
+- **`[unverified]`** in a frame-class label: the structural pattern
+  is observed but the semantic is family-analogy (e.g., STD 0x051
+  is decoded like STD 0x050 because they're adjacent and look
+  structurally identical, but we haven't seen documentation
+  confirming the layout).
+- **`[CONJECTURAL]`** in a parameter / error name: the wire code is
+  real but the specific name attached to it is a positional guess
+  from a derived data source (currently just the Meyra
+  descriptor→display pairing).
+
+Both turn into `Inferred` in the `rnet.confidence` field (when
+that pref is enabled).
+
+### `99.64% evidenced coverage` is per-frame-class, not per-frame
+
+The headline coverage number counts frames, not decode rules. Some
+decode rules cover many thousands of frames (joystick, heartbeats),
+others cover a handful (rare faults). The README's separate
+**49% Code / 27% Documented / 24% Inferred** distribution counts
+**rules**, not frames. A capture can be 99% evidenced even though
+most of its rules are Documented or Inferred, because the few Code-
+tier rules cover the bulk of the wire traffic.
+
+### Filter quick reference
+
+The most useful display filters that aren't immediately obvious:
+
+```sh
+# Show everything inferred (the "what is the dissector unsure about" view)
+-Y 'rnet.confidence == "Inferred"'
+
+# All traffic addressed to one module (stable across firmware versions)
+-Y 'rnet.pop.addr_prefix == "ICS"'
+
+# Auth frames that DID validate against a known network
+-Y 'rnet.auth.network'
+
+# Non-zero faults
+-Y 'rnet.err.code'
+
+# CRC echoes in COMPLETE responses
+-Y 'rnet.pop.crc_value'
+```
+
+(All require the `rnet.show_evidence:TRUE` pref for the
+`rnet.confidence` filter; the others work always.)
+
 ## Known gaps
 
 These show as `Unknown ...` in dissector output and are good targets
@@ -510,14 +616,103 @@ for future RE work:
 | STD `0x04X` (042-045) | 94 | Cluster near param-page `0x040` |
 | STD `0x7BX` (7B2, 7B6) | 52 | Cluster near config-mode `0x7B0/7B1` |
 | XTD `0x181C0X00` (X≠D) | ~91 | Family prefix matches tones (`0x181C0D00`); cJSM firmware not yet dumped, so other functions are uncharacterized |
-| XTD `0x1C2C0X00` | ~54 | Adjacent to distance-counter family |
-| XTD `0x14300X01` | ~42 | Variant of motor-current pattern |
 | XTD `0x0A400X0Y` (other slots) | ~46 | BTM family, slots 02+ not documented |
 
-Per the external RE reply, several of these (especially the STD
-neighborhoods) are likely per-profile or per-target-device variants of
-their documented neighbors. Validating that needs a live capture
-correlating profile/mode switching with frame timestamps.
+(Two previous "gap" entries — `XTD 0x1C2C0X00` and `XTD 0x14300X01` —
+were promoted to **Documented** in 2026-05-23 after empirical
+cross-checks across the corpus. See the relevant decoder comments
+for the structural model.)
+
+Several of the remaining gaps (especially the STD neighborhoods) are
+likely per-profile or per-target-device variants of their documented
+neighbors. Validating that needs a live capture correlating
+profile/mode switching with frame timestamps.
+
+## Planned: firmware-version-aware parameter lookup
+
+The current `.rnd` address lookup uses a single Generic-V33_1_1375
+catalog and emits the resolved name with a `Generic-fw guess` caveat
+plus a stable module prefix (see "Reading the output" above). A
+firmware-version-aware lookup would remove the caveat.
+
+### What it would unlock
+
+- **Accurate parameter names** in `.rnd[0xNNNN]` labels, with no
+  Generic-fw caveat — the dissector would know whether to read the
+  Generic V33_1_1375 catalog, the Amylior catalog, the ETAC catalog,
+  or another firmware-specific catalog.
+- **Per-firmware error catalog routing** — some OEM-specific error
+  codes (e.g., `0x4D00`, `0x9E00` from the Pride / SwitchIt / HMC
+  domains) likely have different names per firmware too. Same
+  approach would apply.
+
+### What it would require
+
+Three things, none of which are solved today:
+
+1. **A reliable signal in wire traffic that identifies firmware
+   version.** Candidate signals:
+   - The `0x1E86`/`0x1E87` chair-fingerprint bytes (chair 50C01C8F
+     consistently produces `0x8314`/`0x0166`; chair B68021AE
+     produces `0x3D16`/`0x0006`). These look like persistent
+     per-chair hashes — possibly include firmware version, possibly
+     pure pairing IDs.
+   - The DIME serial — encodes a YYMM-style manufacturing-batch
+     prefix, which correlates loosely with firmware era but isn't
+     a direct version field.
+   - Startup enumeration frames (`0x1FB0` device-enum), if they
+     contain a firmware-version sub-field.
+   - Mode-config startup payloads.
+2. **A captured mapping** of `firmware-version → fingerprint
+   bytes`. Today we have two chairs in the corpus with known
+   fingerprints but unknown firmware versions. To build the map
+   we'd need captures explicitly labeled with their chair's
+   firmware build (via a Programmer connection that read the
+   firmware ID, or vendor documentation).
+3. **The bundled JSONLs**: ~10MB of parameter catalogs (the 6
+   existing extractions plus any new firmware versions). Today the
+   dissector is a single ~250KB Lua file. Adding the JSONLs is
+   straightforward but bumps the install size 40×, and adds a
+   load-time JSON parser the dissector currently doesn't need.
+
+### Why we aren't doing this now
+
+- **Blocker #1 (fingerprint → firmware mapping) is the hard one.**
+  Until we have multiple chairs in the corpus with KNOWN firmware
+  versions, we can't validate any fingerprint hypothesis. The
+  prefix proxy already gives readers the stable module
+  identification piece, so the marginal value of disambiguating
+  the specific name is small for typical use.
+- **Install-size jump is real.** Going from one 250KB Lua file to a
+  Lua file + 10MB of JSONLs changes the deployment story (drop-in
+  file → manage a directory of bundled data). Worth doing if the
+  feature lands; not worth doing speculatively.
+- **The bundled-data path doesn't help if firmware detection
+  fails.** If the dissector can't identify firmware version from
+  wire traffic, the fallback behavior is exactly what the prefix
+  proxy already does — fall through multiple catalogs, surface
+  ambiguity. The added 10MB buys nothing in the no-firmware-ID
+  case.
+
+### What would unblock this
+
+The order of operations:
+
+1. Find a chair-fingerprint signal that correlates one-to-one with
+   firmware version. Requires captures + firmware-version labels.
+2. Build the `fingerprint → firmware-key` lookup table (likely
+   small — a few dozen entries).
+3. Ship the firmware-version JSONLs alongside the dissector,
+   either bundled or as an optional separate install
+   (`~/.local/lib/wireshark/plugins/rnet_can_catalogs/`).
+4. Add a JSONL loader to the dissector init path.
+5. Promote the `Generic-fw guess` caveat to `Verified for firmware
+   <X>` when the lookup succeeds; keep the prefix as the fallback.
+
+If you have **captures from chairs whose firmware version you know**
+(from a Programmer connection or vendor info), that's the single
+highest-leverage contribution toward this work — see "Contributing"
+below.
 
 ## File layout
 
@@ -528,7 +723,7 @@ analysis/wireshark/
   README.md                — this file
   reassemble_transfers.py  — POP transfer reassembly companion
   pwc_params.json          — vendored Permobil PWC param_id → name snapshot
-  tests/test_dissector.py  — pytest suite (32 tests)
+  tests/test_dissector.py  — pytest suite (36 tests)
 
 ../../captures/
   2026_AT_hackathon.log    — hackathon candump (source for Table D)
