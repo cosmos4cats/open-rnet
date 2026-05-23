@@ -293,6 +293,1274 @@ local known_xor_tables = {
      serial = {[0]=0xB6, [1]=0x80, [2]=0x21, [3]=0xAE}},
 }
 
+local error_codes = {}        -- 818 entries; populated near end of file (see "Big lookup tables")
+
+
+-- Mode-config payload format per Type byte. Evidence:
+-- CJSM_DISPLAY_PROTOCOL.md
+-- "Mode Configuration Frames" §"Data Types".
+local mode_type_names = {
+    [0x00] = "Initialization",
+    [0x40] = "Configuration header",
+    [0x60] = "Mode parameters",
+    [0x61] = "Extended mode data",
+    [0x62] = "Mode serial / XOR data",
+    [0x80] = "Status",
+    [0xC0] = "Flags",
+    [0xF0] = "End-flags",
+}
+
+-- POP register-byte names (data[1] = low byte of ODI). Per
+-- RNET_PROTOCOL_SPECIFICATION.md §8.3 Register Types. Most-common values
+-- in the corpus are 0x80 PAGE0, 0x81 POINTER, 0x8C TEXT, 0x8F DATA;
+-- other 0x8X values appear (0x84, 0x85, 0x88, 0x89, 0x8A, 0x8B) but
+-- aren't documented in §8.3.
+local pop_register_names = {
+    [0x80] = "PAGE0",
+    [0x81] = "POINTER",
+    [0x8C] = "TEXT",
+    [0x8F] = "DATA",
+}
+-- POP register bytes seen empirically but not in §8.3.
+local pop_register_undocumented = {
+    [0x84] = true, [0x85] = true, [0x86] = true, [0x88] = true,
+    [0x89] = true, [0x8A] = true, [0x8B] = true,
+}
+
+local pwc_params = {}         -- 966 entries; populated near end of file
+
+
+local rnd_address_names = {} -- 1,512 entries; populated near end of file
+
+-- ODI class decode from IRConfigurator.exe ODI_CLASS enum (ilspycmd).
+-- The 24-bit ODI in POP data[1..3] decomposes as
+-- `class_base[CLASS] + size_offset[SIZE]` plus a separately-added address.
+-- Class enum names recovered from IRConfigurator.Device.ODI_CLASS via
+-- ilspycmd decompile of IRConfigurator.exe v6.1.2.
+local function decode_odi_class(odi)
+    -- Special case: class 5 SLOT
+    if odi == 0x85 then return "ODI_CLASS_SLOT", 0, "size=0" end
+    if odi == 0x8C then return "ODI_CLASS_SLOT", 0, "size=1-4" end
+    -- Special case: class 6 EVENT
+    if odi >= 0x200 and odi <= 0x203 then
+        return "ODI_CLASS_EVENT", odi - 0x200, string.format("size=%d", odi - 0x200)
+    end
+    -- General case: classes 0-4 with size offset 0..4
+    local bases = {
+        [0] = {0x100, "ODI_CLASS_E2"},   -- EEPROM (non-volatile config)
+        [1] = {0x110, "ODI_CLASS_PORT"}, -- I/O ports
+        [2] = {0x120, "ODI_CLASS_RAM"},  -- working RAM
+        [3] = {0x130, "ODI_CLASS_ROM"},  -- code flash / read-only
+        [4] = {0x140, "ODI_CLASS_ADC"},  -- analog channels
+    }
+    for cls = 0, 4 do
+        local base = bases[cls][1]
+        local name = bases[cls][2]
+        if odi >= base and odi <= base + 4 then
+            return name, odi - base, string.format("size=%d", odi - base)
+        end
+    end
+    return nil, nil, nil
+end
+
+-- DIME serial-number decode from DeviceDriver.GetSN() (IRConfigurator.exe).
+-- 64-bit DIME → human-readable "LLYYMMNNNN" string (2-letter manufacturer
+-- prefix + 2-digit year + 2-digit month + 4-digit per-month sequence).
+local function decode_dime(b0, b1, b2, b3)
+    -- Per GetSN @ DeviceDriver.cs:
+    --   letter2 = ((b1 & 0xC0) >> 6) | ((b2 & 0x07) << 2)
+    --   letter1 = (b2 & 0xFC) >> 3
+    --   year    = b3 / 12 + 4
+    --   month   = b3 % 12 + 1
+    --   seq     = b0 + ((b1 & 0x3F) << 8)
+    local letter2 = bit.bor(bit.rshift(bit.band(b1, 0xC0), 6),
+                            bit.lshift(bit.band(b2, 0x07), 2))
+    local letter1 = bit.rshift(bit.band(b2, 0xFC), 3)
+    -- Defensive: letter indexes 1..26 map to A..Z; anything outside is invalid.
+    if letter1 < 1 or letter1 > 26 or letter2 < 1 or letter2 > 26 then
+        return nil
+    end
+    local year  = math.floor(b3 / 12) + 4
+    local month = (b3 % 12) + 1
+    local seq   = b0 + bit.lshift(bit.band(b1, 0x3F), 8)
+    if month < 1 or month > 12 then return nil end
+    return string.format("%c%c%02d%02d%04d",
+        string.byte("A") + letter1 - 1,
+        string.byte("A") + letter2 - 1,
+        year % 100, month, seq)
+end
+
+local function bytes_to_hex(tvb, off, len)
+    if len <= 0 then return "" end
+    local s = {}
+    for i = 0, len-1 do s[#s+1] = string.format("%02X", tvb(off+i,1):uint()) end
+    return table.concat(s)
+end
+
+-- Per-class decoders ---------------------------------------------------------
+
+local function decode_joystick(tvb, t, cid)
+    local slot = bit.band(bit.rshift(cid, 8), 0xF)
+    t:add(pf.class, "Joystick position")
+    t:add(pf.slot, slot)
+    if tvb:len() >= 2 then
+        local x = tvb(0,1):le_int()
+        local y = tvb(1,1):le_int()
+        t:add(pf.joy_x, tvb(0,1))
+        t:add(pf.joy_y, tvb(1,1))
+        -- Add a directional cue so users can scan motion at a glance.
+        local dir = ""
+        if x == 0 and y == 0 then
+            dir = "  (idle)"
+        else
+            local arrow = ""
+            if y < -10 then arrow = arrow .. "↑"
+            elseif y > 10 then arrow = arrow .. "↓" end
+            if x > 10 then arrow = arrow .. "→"
+            elseif x < -10 then arrow = arrow .. "←" end
+            if arrow ~= "" then dir = "  " .. arrow end
+        end
+        t:add(pf.summary, string.format("Joystick X=%+4d Y=%+4d%s", x, y, dir))
+    end
+    add_evidence(t, "Code", "rnet_utils.py:330")
+    return "Joy"
+end
+
+local function decode_speed(tvb, t, cid)
+    local slot = bit.band(bit.rshift(cid, 8), 0xF)
+    t:add(pf.class, "Speed setting")
+    t:add(pf.slot, slot)
+    if tvb:len() >= 1 then
+        local pct = tvb(0,1):uint()
+        t:add(pf.speed_pct, tvb(0,1))
+        t:add(pf.summary, string.format("Speed range %3d%%", pct))
+    end
+    add_evidence(t, "Documented", "janschu99 RNETdictionary.txt:27 + diary:16")
+    return "Speed"
+end
+
+local function decode_battery(tvb, t, cid)
+    local slot = bit.band(bit.rshift(cid, 8), 0xF)
+    t:add(pf.class, "Battery level")
+    t:add(pf.slot, slot)
+    if tvb:len() >= 1 then
+        local pct = tvb(0,1):uint()
+        t:add(pf.batt_pct, tvb(0,1))
+        -- Add a bar visualization so users can scan battery state.
+        local bars = math.floor(pct / 10)
+        local bar = string.rep("█", bars) .. string.rep("░", 10-bars)
+        t:add(pf.summary, string.format("Battery %3d%% %s", pct, bar))
+    end
+    add_evidence(t, "Code", "rnet_utils.py:352")
+    return "Batt"
+end
+
+local function decode_motor_current(tvb, t, cid)
+    -- Per janschu99 categorized dictionary line 83:
+    -- "14300X00#LlHh :PMtx drive motor current. Little-endian 16-bit.
+    --  Instantaneous. Periodic: 200ms. Units of measurement(?) 2e8 = 1.6"
+    -- DLC=2 across all 9,647 frames in corpus (rnet_utils.py:359's DLC>=4
+    -- requirement never fires — see CRC_VERIFICATION_FINDINGS for the bug).
+    local slot = bit.band(bit.rshift(cid, 8), 0xF)
+    t:add(pf.class, "Motor current")
+    t:add(pf.slot, slot)
+    if tvb:len() >= 2 then
+        local v = tvb(0,2):le_uint()
+        t:add_le(pf.motor_left, tvb(0,2))
+        if v == 0 then
+            t:add(pf.summary, string.format("Motor current slot=%X: idle", slot))
+        else
+            t:add(pf.summary, string.format("Motor current slot=%X = %d (LE u16; unit unknown)", slot, v))
+        end
+    end
+    add_evidence(t, "Documented", "janschu99 categorized dictionary line 83 §14300X00")
+    return "MotI"
+end
+
+local function decode_distance(tvb, t, cid)
+    local slot = bit.band(bit.rshift(cid, 8), 0xF)
+    t:add(pf.class, "Distance counter")
+    t:add(pf.slot, slot)
+    if tvb:len() >= 8 then
+        t:add_le(pf.dist_left,  tvb(0,4))
+        t:add_le(pf.dist_right, tvb(4,4))
+    end
+    add_evidence(t, "Code", "rnet_utils.py:415")
+    return "Dist"
+end
+
+local function decode_motor_enable(tvb, t, cid)
+    local slot = bit.band(bit.rshift(cid, 8), 0xF)
+    t:add(pf.class, "Motor enable")
+    t:add(pf.slot, slot)
+    if tvb:len() >= 2 then
+        t:add(pf.motor_en_l, tvb(0,1))
+        t:add(pf.motor_en_r, tvb(1,1))
+    end
+    add_evidence(t, "Code", "rnet_utils.py:430")
+    return "MotEn"
+end
+
+local function decode_horn(tvb, t, cid)
+    local slot = bit.band(bit.rshift(cid, 8), 0xF)
+    local state = (bit.band(cid, 0xF) == 0) and "start" or "stop"
+    t:add(pf.class, "Horn")
+    t:add(pf.slot, slot)
+    t:add(pf.horn_state, state)
+    t:add(pf.summary, string.format("Horn %s slot=%X", state, slot))
+    add_evidence(t, "Code", "rnet_utils.py:346")
+    return "Horn"
+end
+
+local function decode_lights(tvb, t)
+    -- Per janschu99 RNETdictionary.txt:40: byte 0 = mask (commanded
+    -- indicators), byte 1 = bitmap (current indicator state). Bit map:
+    -- 0x01=Left, 0x04=Right, 0x10=Hazard, 0x80=Flood. Bits 1, 3, 5, 6
+    -- not enumerated in the dictionary; bit 6 is observed during the
+    -- "lamp test - all on" payload `D5 D5` (see diary entry) so is a real
+    -- 5th-or-later indicator with identity TBD.
+    local function light_names(b)
+        local on = {}
+        if bit.band(b,0x01)~=0 then on[#on+1] = "Left" end
+        if bit.band(b,0x04)~=0 then on[#on+1] = "Right" end
+        if bit.band(b,0x10)~=0 then on[#on+1] = "Hazard" end
+        if bit.band(b,0x40)~=0 then on[#on+1] = "bit6?" end
+        if bit.band(b,0x80)~=0 then on[#on+1] = "Flood" end
+        return #on > 0 and table.concat(on, "+") or "off"
+    end
+    t:add(pf.class, "Lighting control")
+    if tvb:len() >= 1 then
+        local mask = tvb(0,1):uint()
+        t:add(pf.light_left,  tvb(0,1))
+        t:add(pf.light_bit1,  tvb(0,1))
+        t:add(pf.light_right, tvb(0,1))
+        t:add(pf.light_bit3,  tvb(0,1))
+        t:add(pf.light_haz,   tvb(0,1))
+        t:add(pf.light_bit5,  tvb(0,1))
+        t:add(pf.light_bit6,  tvb(0,1))
+        t:add(pf.light_flood, tvb(0,1))
+        if tvb:len() >= 2 then
+            local bitmap = tvb(1,1):uint()
+            t:add(pf.light_b1, tvb(1,1))
+            t:add(pf.summary, string.format(
+                "Lights mask=%s bitmap=%s%s",
+                light_names(mask), light_names(bitmap),
+                (mask == bitmap) and "" or "  (transitioning)"))
+        else
+            t:add(pf.summary, "Lights mask=" .. light_names(mask) .. " (DLC=1)")
+        end
+    end
+    add_evidence(t, "Documented", "janschu99 RNETdictionary.txt:40")
+    return "Lights"
+end
+
+local function decode_serial_heartbeat(tvb, t)
+    t:add(pf.class, "JSM serial heartbeat")
+    if tvb:len() >= 4 then
+        t:add(pf.serial_bytes, tvb(0, math.min(8, tvb:len())))
+        local sn = bytes_to_hex(tvb, 0, math.min(4, tvb:len()))
+        -- At power-on the JSM emits all-zero serial-heartbeat frames
+        -- before it has loaded its own serial from EEPROM. The real
+        -- serial appears in the subsequent auth-response handshake.
+        -- Label this state explicitly so readers don't think the
+        -- dissector dropped bytes.
+        if sn == "00000000" then
+            t:add(pf.summary, "JSM serial heartbeat (pre-init — serial not yet loaded)")
+        else
+            t:add(pf.summary, string.format("JSM serial=%s", sn))
+        end
+    end
+    add_evidence(t, "Code", "rnet_utils.py:275")
+    return "SerHB"
+end
+
+local function decode_auth(tvb, t, cid, is_rtr)
+    -- 0x1F [SEQ][SLOT] [KEY][VALUE]   (parse_auth_frame_id, line 128)
+    local seq   = bit.band(bit.rshift(cid, 20), 0xF)
+    local slot  = bit.band(bit.rshift(cid, 16), 0xF)
+    local key   = bit.band(bit.rshift(cid,  8), 0xFF)
+    local value = bit.band(cid, 0xFF)
+    t:add(pf.class, is_rtr and "Serial auth — RTR challenge" or "Serial auth — response")
+    t:add(pf.auth_seq, seq)
+    t:add(pf.auth_slot, slot)
+    t:add(pf.auth_key, key)
+    t:add(pf.auth_value, value)
+
+    -- XOR validation: identify the network by key match at seq 0-3 (where
+    -- keys are discriminating). All devices on a network share the same
+    -- xor_table → same derived key for a given seq regardless of slot.
+    -- The value byte is the responding device's serial byte (different per
+    -- slot). seq 4-7 keys can coincidentally collide between networks
+    -- (both Table A and D have 0x45 at seq=7), so we don't use seq>3 for
+    -- network identification.
+    local matched_net = nil
+    if not is_rtr and seq <= 3 then
+        for _, net in ipairs(known_xor_tables) do
+            if net.keys[seq] == key then
+                matched_net = net
+                t:add(pf.auth_valid, true):set_generated()
+                t:add(pf.auth_net, net.name):set_generated()
+                if net.serial and net.serial[seq] == value then
+                    -- JSM-slot match — value also confirms
+                    t:add(pf.summary, string.format(
+                        "Auth response seq=%d slot=%X key=0x%02X val=0x%02X ✓ %s [JSM serial]",
+                        seq, slot, key, value, net.name:match("^([^:]+)")))
+                    add_evidence(t, "Code", "XOR-table cross-check (full JSM serial match)")
+                    return "Auth"
+                end
+                break
+            end
+        end
+    end
+
+    -- Short network tag like "Table B" extracted from full name.
+    local net_tag = ""
+    if matched_net then
+        net_tag = " ✓ " .. matched_net.name:match("^([^:]+)")
+    end
+    if is_rtr then
+        t:add(pf.summary, string.format("Auth challenge seq=%d slot=%X key=0x%02X val=0x%02X [RTR]",
+            seq, slot, key, value))
+    else
+        t:add(pf.summary, string.format("Auth response seq=%d slot=%X key=0x%02X val=0x%02X%s",
+            seq, slot, key, value, net_tag))
+    end
+    add_evidence(t, "Code", "rnet_utils.py:315 + parse_auth_frame_id:128")
+    return "Auth"
+end
+
+-- Standard-ID POP frame: (CAN ID & 0x7E0) == 0x780.
+-- Byte 0 is a packed (TransferCode, Quick, bit4, OtherNode) tuple; bytes 1-3
+-- hold the 24-bit ODI; bytes 4-6 hold a 24-bit Size; byte 7 is the Block
+-- counter. Per docs/DONGLE_INTERFACE_DLL_TYPES.md "Standard (11-bit) CAN ID
+-- POP message" (CPOPMsg decompile).
+local function decode_pop_std(tvb, t, cid)
+    local this_node = bit.band(cid, 0xF)
+    local dir       = bit.band(bit.rshift(cid, 4), 1)
+    t:add(pf.class, "POP (standard-ID)")
+    t:add(pf.pop_this, this_node)
+    t:add(pf.pop_this_str, slot_name(this_node)):set_generated()
+    t:add(pf.pop_dir, dir)
+
+    if tvb:len() >= 1 then
+        local b0 = tvb(0,1):uint()
+        local tc       = bit.band(bit.rshift(b0, 6), 0x3)
+        local other    = bit.band(b0, 0xF)
+
+        t:add(pf.pop_tc, tc):append_text(string.format("  (bits 7-6 of data[0]=0x%02X)", b0))
+        t:add(pf.pop_tc_str, tc_name(tc, false)):set_generated()
+        t:add(pf.pop_quick, tvb(0,1))
+        t:add(pf.pop_crc,   tvb(0,1))
+        t:add(pf.pop_other, other)
+        t:add(pf.pop_other_str, slot_name(other)):set_generated()
+
+        local is_abort = (tc == 3)
+        t:add(pf.pop_is_abort, is_abort):set_generated()
+
+        local legacy = legacy_label(b0)
+        if legacy then t:add(pf.pop_label, legacy):set_generated() end
+
+        local reg_name = nil
+        if tvb:len() >= 8 then
+            -- ODI = data[1..3] little-endian 24-bit; Size = data[4..6] LE 24-bit;
+            -- Block = data[7]. EXCEPTION: when byte 0 = 0x8F (COMPLETE
+            -- response), bytes 4-5 carry the embedded CRC-16/CCITT-FALSE
+            -- of the just-completed transfer's data, per CPOPMsg::SetCRC @
+            -- 0x10002610 (external RE notes R4 reply). Empirically verified
+            -- against programmer_write capture: 13-byte TEXT data block
+            -- produces CRC 0x6F36 matching frame 270's d[4..5] LE.
+            local odi = tvb(1,1):uint() + tvb(2,1):uint()*256 + tvb(3,1):uint()*65536
+            local sz  = tvb(4,1):uint() + tvb(5,1):uint()*256 + tvb(6,1):uint()*65536
+            t:add(pf.pop_odi,  tvb(1,3), odi)
+            if b0 == 0x8F then
+                -- COMPLETE: bytes 4-5 are the embedded CRC.
+                t:add_le(pf.pop_crc_value, tvb(4,2))
+            else
+                -- For Quick-style frames on documented registers, bytes 4-7
+                -- carry the value/pointer/data being exchanged. The "Size"
+                -- label is correct only for segmented-transfer setup frames
+                -- (TC=1 with CRCFlag=1) — others use this region as data.
+                local reg = tvb(1,1):uint()
+                local is_setup = (tc == 1) and (bit.band(b0, 0x10) ~= 0)
+                if is_setup then
+                    t:add(pf.pop_size, tvb(4,3), sz)
+                else
+                    t:add_le(pf.pop_value16, tvb(4,2))
+                    t:add_le(pf.pop_value32, tvb(4,4))
+                    if reg == 0x81 then
+                        -- POINTER register: byte 4 = pointer-index,
+                        -- byte 6 = sub-index. Per janschu99 dictionary
+                        -- line 14: "78M#2P810000Xx00Vv00 : check if
+                        -- pointer Xx sub Vv exists."
+                        local p_idx = tvb(4,1):uint()
+                        local p_sub = tvb(6,1):uint()
+                        t:add(pf.pop_ptr_idx, tvb(4,1)):set_generated()
+                        t:add(pf.pop_ptr_sub, tvb(6,1)):set_generated()
+                        t:add_le(pf.pop_pointer, tvb(4,2)):set_generated()
+                        -- Parameter cross-reference: empirical wire POINTER
+                        -- (idx, sub) tuples in programmer-attached captures
+                        -- map to permobil-pwc-param-id via
+                        -- param_id = (sub << 8) | idx. E.g. (6,1) =
+                        -- 262 = "BackUp", (14,1) = 270 = "TiltToggle".
+                        --
+                        -- ONLY emit the name when p_sub >= 1, because low
+                        -- param_ids (sub=0, idx<50) have many ambiguous
+                        -- registry bindings (e.g. param_id=2 binds
+                        -- ALPHANUMERIC, BYTE_SEGMENTS, C350...). The
+                        -- sub>=1 range is dominated by Permobil PWC
+                        -- chair-actuator commands which have unique
+                        -- bindings.
+                        local param_id = bit.bor(bit.lshift(p_sub, 8), p_idx)
+                        t:add(pf.pop_ptr_pid, param_id):set_generated()
+                        if p_sub >= 1 then
+                            local name = pwc_params[param_id]
+                            if name then
+                                t:add(pf.pop_ptr_name, name):set_generated()
+                            end
+                        end
+                    end
+                end
+            end
+            t:add(pf.pop_block, tvb(7,1))
+            -- Label the register name when low byte of ODI matches a
+            -- documented §8.3 register and the upper 16 bits are zero
+            -- (i.e. ODI is a "register address" not a memory address).
+            local reg = tvb(1,1):uint()
+            if tvb(2,1):uint() == 0 and tvb(3,1):uint() == 0 then
+                if pop_register_names[reg] then
+                    reg_name = pop_register_names[reg]
+                    t:add(pf.pop_reg_name, reg_name):set_generated()
+                elseif pop_register_undocumented[reg] then
+                    reg_name = string.format("0x%02X (undocumented 0x8X register)", reg)
+                    t:add(pf.pop_reg_name, reg_name):set_generated()
+                end
+            end
+            -- ODI class decode (IRConfigurator.exe ODI_CLASS enum (ilspycmd)):
+            -- the 24-bit ODI can be split into a class + address pair.
+            local odi_cls, odi_addr, _ = decode_odi_class(odi)
+            if odi_cls then
+                t:add(pf.pop_odi_class, odi_cls):set_generated()
+                t:add(pf.pop_odi_addr,  odi_addr):set_generated()
+                if not reg_name then
+                    reg_name = string.format("%s[0x%02X]",
+                        odi_cls:gsub("^ODI_CLASS_", ""), odi_addr)
+                end
+            end
+            -- .rnd memory-address fallback: when ODI is NOT a register
+            -- opcode (data[1] not 0x80-0x8F with zero upper bytes) and
+            -- data[3]=0, treat data[1..2] as a 16-bit memory address and
+            -- look it up in the .rnd parameter table. The hit rate is
+            -- low (~14%) and ODI_CLASS isn't yet disambiguated, but the
+            -- hits that do land are semantically coherent (consecutive
+            -- channel/button parameters). Only fires when no reg_name
+            -- was already assigned, so it never overrides register-based
+            -- labels.
+            if reg_name == nil and tvb(3,1):uint() == 0 then
+                local cand = tvb(1,1):uint() + tvb(2,1):uint() * 256
+                if cand ~= 0 then
+                    local addr_name = rnd_address_names[cand]
+                    if addr_name then
+                        t:add(pf.pop_addr_name, addr_name):set_generated()
+                        reg_name = string.format(".rnd[0x%04X]=%s", cand, addr_name)
+                    end
+                end
+            end
+        end
+
+        -- For POP frames touching the TEXT register (0x8C), if bytes 4-7
+        -- are printable ASCII the payload is a cJSM display string chunk.
+        -- Per janschu99 dictionary line 17: "79M#2P8C0000asciitxt :PMtx
+        -- text chunk used for cJSM display messages."
+        -- Excludes COMPLETE (b0=0x8F) because bytes 4-5 there are the CRC.
+        local ascii_text = nil
+        if reg_name == "TEXT" and tvb:len() >= 8 and b0 ~= 0x8F then
+            local s = ""
+            local printable = 0
+            for i = 4, 7 do
+                local c = tvb(i,1):uint()
+                if c >= 0x20 and c < 0x7F then
+                    s = s .. string.char(c)
+                    printable = printable + 1
+                elseif c == 0 then
+                    s = s .. "·"  -- null
+                else
+                    s = s .. "?"
+                end
+            end
+            if printable >= 1 then ascii_text = s end
+        end
+
+        -- Compact form: op-name when known, fall back to TC label.
+        local op = legacy or tc_name(tc, false)
+        local reg_str    = reg_name and (" reg="..reg_name) or ""
+        local text_str   = ascii_text and string.format("  text=\"%s\"", ascii_text) or ""
+        local extra_str  = ""
+        if b0 == 0x8F and tvb:len() >= 6 then
+            -- COMPLETE: bytes 4-5 = embedded CRC
+            extra_str = string.format("  CRC=0x%04X", tvb(4,2):le_uint())
+        elseif tvb:len() >= 8 then
+            local reg = tvb(1,1):uint()
+            local is_setup = (tc == 1) and (bit.band(b0, 0x10) ~= 0)
+            if not is_setup then
+                -- Show the value/pointer that's being exchanged.
+                local v16 = tvb(4,2):le_uint()
+                local v32 = tvb(4,4):le_uint()
+                if reg == 0x81 and bit.band(v32, 0xFF00FF00) == 0 and v32 ~= 0 then
+                    -- POINTER frame in (idx, 0, sub, 0) layout. Suppress
+                    -- the PWC name for sub=0 (low param_ids have ambiguous
+                    -- bindings) — only label sub>=1 actuator-command space.
+                    local idx = tvb(4,1):uint()
+                    local sub = tvb(6,1):uint()
+                    local pid = bit.bor(bit.lshift(sub, 8), idx)
+                    local pname = (sub >= 1) and pwc_params[pid] or nil
+                    if sub ~= 0 then
+                        extra_str = string.format("  ptr=%d.%d (param %d%s)",
+                            idx, sub, pid,
+                            pname and (": " .. pname) or "")
+                    else
+                        extra_str = string.format("  ptr=%d", idx)
+                    end
+                elseif reg == 0x81 and v16 ~= 0 then
+                    -- POINTER fallback (data layout not matching idx/sub)
+                    extra_str = string.format("  ptr=0x%04X", v16)
+                elseif reg == 0x8F and not ascii_text then
+                    -- Data value
+                    if v32 < 0x10000 then
+                        extra_str = string.format("  value=0x%04X (%d)", v16, v16)
+                    else
+                        extra_str = string.format("  value=0x%08X", v32)
+                    end
+                end
+            end
+        end
+        t:add(pf.summary, string.format(
+            "POP %s→%s  %s%s%s%s",
+            slot_name(this_node), slot_name(other),
+            op, reg_str, text_str, extra_str))
+    end
+    add_evidence(t, "Code", "DongleInterface.dll CPOPMsg class (Ghidra)")
+    return "POPstd"
+end
+
+-- Extended-ID POP frame: ((CAN ID >> 18) & 0x7E0) == 0x780.
+-- Bits 21-18 = node (4), 17-16 = TC (2), 15-0 = SegmentNumber. All 8 data
+-- bytes are segment payload — no command byte. Per same source.
+local function decode_pop_xtd(tvb, t, cid)
+    local node    = bit.band(bit.rshift(cid, 18), 0xF)
+    local tc      = bit.band(bit.rshift(cid, 16), 0x3)
+    local seg     = bit.band(cid, 0xFFFF)
+    t:add(pf.class, "POP (extended-ID)")
+    t:add(pf.pop_this, node)
+    t:add(pf.pop_this_str, slot_name(node)):set_generated()
+    t:add(pf.pop_tc, tc)
+    t:add(pf.pop_tc_str, tc_name(tc, true)):set_generated()
+    t:add(pf.pop_segment, seg)
+    t:add(pf.pop_is_last, (tc == 3)):set_generated()
+    t:add(pf.summary, string.format(
+        "POP-ext to %s  %s  seg=%d",
+        slot_name(node), tc_name(tc, true), seg))
+    add_evidence(t, "Code", "DongleInterface.dll CPOPMsg class (Ghidra)")
+    return "POPxtd"
+end
+
+-- Mode-configuration frame: XTD ID 0x1ECMMSST where MM = mode index,
+-- SS = sub-address, T = data-type nibble (00/40/60/61/62/80/C0/F0). Per
+-- CJSM_DISPLAY_PROTOCOL.md
+-- "Mode Configuration Frames" + RNET_PROTOCOL_SPECIFICATION.md §11.
+local function decode_mode_config(tvb, t, cid)
+    -- Mode index is one nibble (bits 19-16). Sub-address (bits 15-8) and
+    -- Type (bits 7-0) are each one full byte.
+    --
+    -- Per-Type payload format from CJSM_DISPLAY_PROTOCOL.md:
+    --   Type 0x40 (config header): payload like `01 03 00 00 00 00 00 00`
+    --   Type 0x60 (mode parameters): raw mode-parameter block
+    --   Type 0x61 (extended mode data) — known sub-fields:
+    --     Bytes 0-1: Slot/index prefix
+    --     Bytes 2-3: Data type (0x80=button, 0x40=action)
+    --     Bytes 4-5: Address/parameter ID
+    --     Bytes 6-7: Value
+    --   Type 0x62 (mode XOR/serial data): mode-specific serial bytes
+    --   Type 0x80 (status): usually all zeros
+    --   Type 0xC0, 0xF0 (flags): like `01 00 00 00 00 00 00 00`
+    local mode    = bit.band(bit.rshift(cid, 16), 0xF)
+    local subaddr = bit.band(bit.rshift(cid,  8), 0xFF)
+    local typ     = bit.band(cid, 0xFF)
+    t:add(pf.class, "Mode configuration")
+    t:add(pf.mode_idx, mode)
+    t:add(pf.mode_subaddr, subaddr)
+    t:add(pf.mode_type, typ)
+    t:add(pf.mode_type_s, mode_type_names[typ] or string.format("Unknown type 0x%02X", typ)):set_generated()
+
+    local detail = ""
+    if typ == 0x40 and tvb:len() >= 8 then
+        -- Configuration header. CJSM doc gives example payload
+        -- `01 03 00 00 00 00 00 00`. Bytes 0-1 look like a header tag.
+        detail = string.format("  hdr=%02X%02X reserved=%02X%02X%02X%02X%02X%02X",
+            tvb(0,1):uint(), tvb(1,1):uint(),
+            tvb(2,1):uint(), tvb(3,1):uint(), tvb(4,1):uint(),
+            tvb(5,1):uint(), tvb(6,1):uint(), tvb(7,1):uint())
+    elseif typ == 0x60 and tvb:len() >= 8 then
+        -- Mode parameters: raw 8-byte block. Show as hex.
+        detail = "  params=" .. bytes_to_hex(tvb, 0, 8)
+    elseif typ == 0x61 and tvb:len() >= 8 then
+        -- Extended mode data per cJSM display-protocol notes. Per
+        -- external RE notes R3.5 F6: byte order is MIXED — example payload
+        -- 0001028000400200 decodes only if bytes 2-3 are BE and bytes 6-7
+        -- are LE (different fields owned by different protocol layers).
+        -- Bytes 0-1 layout is ambiguous in the doc; show as raw pair.
+        local b0, b1    = tvb(0,1):uint(), tvb(1,1):uint()
+        local data_type = tvb(2,1):uint() * 256 + tvb(3,1):uint()  -- BE
+        local addr      = tvb(4,1):uint() * 256 + tvb(5,1):uint()  -- BE per doc example
+        local value     = tvb(6,1):uint() + tvb(7,1):uint() * 256  -- LE per doc example
+        local dt_name = (data_type == 0x0280) and "button" or
+                        (data_type == 0x0040) and "action" or
+                        string.format("0x%04X", data_type)
+        detail = string.format("  pfx=%02X%02X type=%s(BE) addr=0x%04X(BE) value=0x%04X(LE) [mixed-endian]",
+                               b0, b1, dt_name, addr, value)
+    elseif typ == 0x62 and tvb:len() >= 8 then
+        -- Mode XOR / serial data: show as hex (per-mode XOR key fragment).
+        detail = "  xor_data=" .. bytes_to_hex(tvb, 0, 8)
+    elseif (typ == 0xC0 or typ == 0xF0) and tvb:len() >= 1 then
+        -- Flags: typically `01 00 ...` per CJSM doc.
+        detail = string.format("  flag=0x%02X", tvb(0,1):uint())
+    end
+
+    t:add(pf.summary, string.format("ModeCfg mode=%d subaddr=0x%02X type=0x%02X (%s)%s",
+        mode, subaddr, typ, mode_type_names[typ] or "?", detail))
+    add_evidence(t, "Code", "cJSM display-protocol notes §Mode Configuration Frames + empirical Type-0x61 decode")
+    return "ModeCfg"
+end
+
+local function decode_tones(tvb, t)
+    t:add(pf.class, "Tones / buzzer")
+    if tvb:len() >= 2 then
+        local out = {}
+        for i = 0, tvb:len()-1, 2 do
+            if i+1 < tvb:len() then
+                out[#out+1] = string.format("L%d:N%d", tvb(i,1):uint(), tvb(i+1,1):uint())
+            end
+        end
+        local s = table.concat(out, " ")
+        t:add(pf.tones, s)
+        t:add(pf.summary, "Tones: " .. s)
+    end
+    add_evidence(t, "Code", "rnet_utils.py:377")
+    return "Tone"
+end
+
+local function decode_device_enum(tvb, t, cid)
+    local slot = bit.band(cid, 0xF)
+    t:add(pf.class, "Device enumeration")
+    t:add(pf.slot, slot)
+    if tvb:len() >= 8 then
+        t:add(pf.serial_bytes, tvb(0, 8))
+        -- Decode as DIME → human-readable "LLYYMMNNNN" per
+        -- DeviceDriver.GetSN() (IRConfigurator.exe decompile).
+        local dime = decode_dime(tvb(0,1):uint(), tvb(1,1):uint(),
+                                  tvb(2,1):uint(), tvb(3,1):uint())
+        if dime then
+            t:add(pf.dime_serial, dime):set_generated()
+            t:add(pf.summary, string.format("Device slot=%X serial=%s (raw=%s)",
+                slot, dime, bytes_to_hex(tvb, 0, 8)))
+        else
+            t:add(pf.summary, string.format("Device slot=%X serial=%s",
+                slot, bytes_to_hex(tvb, 0, 8)))
+        end
+    end
+    add_evidence(t, "Code", "rnet_utils.py:389 + DeviceDriver.GetSN decompile")
+    return "DevEnum"
+end
+
+-- Standard-frame (11-bit) decoders -------------------------------------------
+-- All rules below are from rnet_utils.py:decode_frame() (lines 269-310).
+
+local function decode_std(tvb, t, cid, is_rtr)
+    if cid == 0x000 then
+        t:add(pf.class, is_rtr and "Sleep all devices" or "Sleep command")
+        t:add(pf.summary, is_rtr and "Sleep all (RTR)" or "Sleep cmd")
+        add_evidence(t, "Code", "rnet_utils.py:271")
+        return "Sleep"
+    elseif cid == 0x002 then
+        -- [unverified] dictionary §1 (RNET_FRAME_DICTIONARY.md): "PM sleep all
+        -- (alternate) / Seen during JSM init". Not in runnable decoder.
+        local desc = is_rtr and "PM sleep all (alternate)" or "Seen during JSM init"
+        t:add(pf.class, desc .. " [unverified]")
+        add_evidence(t, "Inferred", "frame_dict §1 family-analogy")
+        return "Sleep2"
+    elseif cid == 0x004 then
+        -- [unverified] dictionary §1
+        local desc = is_rtr and "Sleep/wake sequence" or "JSM sleep commencing"
+        t:add(pf.class, desc .. " [unverified]")
+        add_evidence(t, "Inferred", "frame_dict §1 family-analogy")
+        return "Sleep4"
+    elseif cid == 0x00C then
+        t:add(pf.class, "Network test")
+        add_evidence(t, "Code", "rnet_utils.py:273")
+        return "NetTest"
+    elseif cid == 0x00E then
+        return decode_serial_heartbeat(tvb, t)
+    elseif cid == 0x040 then
+        t:add(pf.class, "Open parameter page")
+        add_evidence(t, "Code", "rnet_utils.py:279")
+        return "OpenParam"
+    elseif cid == 0x041 then
+        t:add(pf.class, "Close parameter page")
+        add_evidence(t, "Code", "rnet_utils.py:281")
+        return "CloseParam"
+    elseif cid == 0x050 then
+        -- Per janschu99 dictionary line 10: `050#Ss0M00XX` JSMrx,
+        -- "appears to be in same format as 060#Ss0M00XX" — attribute Ss of
+        -- mode M as data XX.
+        t:add(pf.class, "Mode map (JSMrx)")
+        if tvb:len() >= 4 then
+            local ss = tvb(0,1):uint()
+            local m  = bit.band(tvb(1,1):uint(), 0xF)
+            local xx = tvb(3,1):uint()
+            t:add(pf.summary, string.format(
+                "Mode map: attribute=0x%02X mode=%d data=0x%02X", ss, m, xx))
+        end
+        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt:10")
+        return "ModeMap"
+    elseif cid == 0x060 then
+        -- 0x060 has two documented uses:
+        --   Per janschu99 dictionary line 13: `060#Ss0M00XX` JSMrx return
+        --     attribute Ss of mode M as data XX.
+        --   Per janschu99 diary lines 10-12: PM-tx joystick-event for
+        --     specific profiles (DriveProfile / LiftProfile / chairAngle):
+        --       060#90000000 = DriveProfile joystick event stop
+        --       060#90010040 = LiftProfile joystick event start
+        --       060#90010000 = LiftProfile joystick event stop
+        --       060#90010040 = chairAngle motor running (categorized:56-57)
+        --       060#90010000 = chairAngle motor stopped
+        t:add(pf.class, "Mode attribute / joystick event (0x060)")
+        if tvb:len() >= 4 then
+            local b0 = tvb(0,1):uint()
+            local b1 = tvb(1,1):uint()
+            local b3 = tvb(3,1):uint()
+            if b0 == 0x90 then
+                local profile = (b1 == 0x00) and "Drive" or (b1 == 0x01) and "Lift/chairAngle" or string.format("0x%02X", b1)
+                local state = (b3 == 0x40) and "running/start" or (b3 == 0x00) and "stopped/stop" or string.format("0x%02X", b3)
+                t:add(pf.summary, string.format("PMtx %s joystick event: %s", profile, state))
+            else
+                local m = bit.band(b1, 0xF)
+                t:add(pf.summary, string.format(
+                    "JSMrx mode attribute: Ss=0x%02X mode=%d data=0x%02X", b0, m, b3))
+            end
+        end
+        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt:13 + diary:10-12 + categorized:56-57")
+        return "ModeAttr"
+    elseif cid == 0x051 then
+        -- Per janschu99 dictionary line 9: `051#004M0000` JSMtx select
+        -- profile M.
+        t:add(pf.class, "JSMtx select profile")
+        if tvb:len() >= 2 then
+            local m = bit.band(tvb(1,1):uint(), 0xF)
+            t:add(pf.summary, string.format("Select profile %d", m))
+        end
+        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt:9")
+        return "SelProf"
+    elseif cid == 0x061 then
+        -- Per janschu99 dictionary lines 11-12:
+        --   061#404M0000 = suspend mode M
+        --   061#004M0000 = select mode M (last mode must be suspended first)
+        t:add(pf.class, "Mode control")
+        if tvb:len() >= 2 then
+            local b0 = tvb(0,1):uint()
+            local m  = bit.band(tvb(1,1):uint(), 0xF)
+            if b0 == 0x40 then
+                t:add(pf.summary, string.format("Suspend mode %d", m))
+            elseif b0 == 0x00 then
+                t:add(pf.summary, string.format("Select mode %d", m))
+            else
+                t:add(pf.summary, string.format("Mode control byte0=0x%02X mode=%d", b0, m))
+            end
+        end
+        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt:11-12")
+        return "ModeCtl"
+    elseif bit.band(cid, 0x7E0) == 0x780 then
+        -- POP standard-ID frame (any of 0x780..0x79F).
+        return decode_pop_std(tvb, t, cid)
+    elseif cid == 0x7A0 then
+        -- Programmer presence announcement. Sent by the Programmer when it
+        -- joins the bus. Per frame-class glossary notes +
+        -- open-rnet UPD_HUNT_AND_POP_FINDING.md.
+        t:add(pf.class, "Programmer presence")
+        t:add(pf.summary, "Programmer presence announcement")
+        add_evidence(t, "Documented", "frame-class glossary notes + UPD_HUNT_AND_POP_FINDING.md")
+        return "ProgHere"
+    elseif cid == 0x7B0 then
+        t:add(pf.class, "Config mode 0")
+        add_evidence(t, "Code", "rnet_utils.py:303")
+        return "Cfg0"
+    elseif cid == 0x7B1 then
+        t:add(pf.class, "Config mode 1")
+        add_evidence(t, "Code", "rnet_utils.py:305")
+        return "Cfg1"
+    elseif cid == 0x7B3 then
+        t:add(pf.class, is_rtr and "Serial exchange request" or "Serial exchange")
+        add_evidence(t, "Code", "rnet_utils.py:307")
+        return "SerExch"
+    elseif cid >= 0x040 and cid <= 0x04F then
+        -- Param-page family extension. 0x040/041 documented (open/close).
+        -- 042-04F are not documented but cluster tightly with the documented
+        -- pair. Round-3 reply suggested by analogy these are intermediate
+        -- param-page operations.
+        local fn = cid - 0x040
+        t:add(pf.class, string.format("Param-page family (fn 0x%X) [unverified]", fn))
+        t:add(pf.summary, string.format("Param-page family, function 0x%X", fn))
+        add_evidence(t, "Inferred", "family-analogy to documented 0x040/0x041")
+        return "ParamX"
+    elseif cid >= 0x050 and cid <= 0x05F then
+        -- Mode-map family extension. 0x050 documented as "Mode map" per
+        -- rnet_utils.py:283; 051-05F are family variants by analogy.
+        local fn = cid - 0x050
+        t:add(pf.class, string.format("Mode-map family (fn 0x%X) [unverified]", fn))
+        t:add(pf.summary, string.format("Mode-map family, function 0x%X", fn))
+        add_evidence(t, "Inferred", "family-analogy to documented 0x050 Mode map")
+        return "ModeMapX"
+    elseif cid >= 0x060 and cid <= 0x06F then
+        -- Mode-family extension. 0x060 = Mode request (R3 evidenced);
+        -- 0x061 = Mode control (rnet_utils.py:285); 062-06F by analogy.
+        local fn = cid - 0x060
+        t:add(pf.class, string.format("Mode family (fn 0x%X) [unverified]", fn))
+        t:add(pf.summary, string.format("Mode family, function 0x%X", fn))
+        add_evidence(t, "Inferred", "family-analogy to documented 0x060/0x061")
+        return "ModeFamX"
+    elseif cid >= 0x7B0 and cid <= 0x7BF then
+        -- Config-mode family extension. 0x7B0/7B1/7B3 documented in
+        -- rnet_utils.py. 7B2/7B4-7BF by analogy.
+        local fn = cid - 0x7B0
+        t:add(pf.class, string.format("Config-mode family (fn 0x%X) [unverified]", fn))
+        t:add(pf.summary, string.format("Config-mode family, function 0x%X", fn))
+        add_evidence(t, "Inferred", "family-analogy to documented 0x7B0/0x7B1/0x7B3")
+        return "CfgFamX"
+    else
+        t:add(pf.class, string.format("Unknown STD 0x%03X", cid))
+        return nil
+    end
+end
+
+-- Extended-frame (29-bit) decoders -------------------------------------------
+-- Rules from rnet_utils.py:decode_frame() lines 313-442.
+
+local function decode_xtd(tvb, t, cid, is_rtr)
+    -- Specific 0x1FB000XX device-enum check BEFORE the generic 0x1F auth
+    -- rule, since 0x1FB000XX shares the 0x1F top byte but is a different
+    -- frame class (8-byte DIME serial payload, not (key, value)).
+    if bit.band(cid, 0xFFFFFF00) == 0x1FB00000 then
+        return decode_device_enum(tvb, t, cid)
+    elseif bit.rshift(cid, 24) == 0x1F then
+        return decode_auth(tvb, t, cid, is_rtr)
+    elseif bit.band(cid, 0xFFFFF0FF) == 0x02000000 then
+        return decode_joystick(tvb, t, cid)
+    elseif bit.band(cid, 0xFFFFF0FF) == 0x0A040000 then
+        return decode_speed(tvb, t, cid)
+    elseif cid == 0x0A400300 or cid == 0x0A400301 then
+        -- BTMouse (Bluetooth Mouse module) Control 1/2.
+        -- Evidenced: DongleInterface.dll wire-format notes §14.2 (line
+        -- 890-891), corroborated in DEVICE_SERIALS.md §BTMouse.
+        local n = (cid == 0x0A400300) and 1 or 2
+        t:add(pf.class, string.format("BTM Control %d", n))
+        t:add(pf.summary, string.format("BTMouse Control %d", n))
+        add_evidence(t, "Code", "DongleInterface.dll wire-format notes §14.2")
+        return "BTMctl"
+    elseif cid == 0x0A400002 or cid == 0x0A400102 then
+        -- BTMouse Status 1/2 — same family, §14.2.
+        local n = (cid == 0x0A400002) and 1 or 2
+        t:add(pf.class, string.format("BTM Status %d", n))
+        t:add(pf.summary, string.format("BTMouse Status %d", n))
+        add_evidence(t, "Code", "DongleInterface.dll wire-format notes §14.2")
+        return "BTMstat"
+    elseif bit.band(cid, 0xFFFFF0F0) == 0x0C040000 then
+        return decode_horn(tvb, t, cid)
+    elseif bit.band(cid, 0xFFFFF0FF) == 0x1C0C0000 then
+        return decode_battery(tvb, t, cid)
+    elseif bit.band(cid, 0xFFFFF0FF) == 0x14300000 then
+        return decode_motor_current(tvb, t, cid)
+    elseif cid == 0x03C30F0F then
+        -- Payload empirically constant `87 87 87 87 87 87 87 00` across
+        -- 500/500 hackathon-dump samples + open-rnet captures. Treat as
+        -- "JSM alive signature" with a validation check.
+        t:add(pf.class, "JSM heartbeat")
+        local valid = false
+        if tvb:len() >= 7 then
+            valid = true
+            for i = 0, 6 do
+                if tvb(i,1):uint() ~= 0x87 then valid = false; break end
+            end
+        end
+        t:add(pf.jsm_signature, valid):set_generated()
+        t:add(pf.summary, valid and "JSM heartbeat (signature 87×7 OK, 100ms periodic)"
+                                or "JSM heartbeat (UNEXPECTED PAYLOAD)")
+        add_evidence(t, "Code", "janschu99 RNETdictionary.txt:26 + empirical 500/500 corroboration")
+        return "JSMhb"
+    elseif bit.band(cid, 0xFFFFF0FF) == 0x0C140000 then
+        -- 0x0C14[slot]00 = module-emitted heartbeat. Originally documented
+        -- as "PM heartbeat" (janschu99 line 44, slot=0 case) but the family
+        -- is per-emitter: slot 0 (PM) is the documented case; slot 4 (ILM
+        -- per default map) has its own variant per janschu99 line 45
+        -- ("0C140400#82 :(?) Periodic: 1000ms. Lamp controller(?)").
+        -- Byte 0 reuses the documented POP byte-0 bit-packing (TC + OtherNode).
+        local slot = bit.band(bit.rshift(cid, 8), 0xF)
+        local label = (slot == 0) and "PM heartbeat" or
+                      string.format("%s heartbeat", slot_name(slot))
+        t:add(pf.class, label)
+        t:add(pf.slot, slot)
+        if tvb:len() >= 1 then
+            local b     = tvb(0,1):uint()
+            local tc    = bit.band(bit.rshift(b, 6), 0x3)
+            local other = bit.band(b, 0xF)
+            t:add(pf.pm_status_byte, tvb(0,1))
+            t:add(pf.pop_tc,    tc)
+            t:add(pf.pop_quick, tvb(0,1))
+            t:add(pf.pop_crc,   tvb(0,1))
+            t:add(pf.pop_other, other)
+            t:add(pf.pop_other_str, slot_name(other)):set_generated()
+            -- Documented phase markers (diary 34-35, slot 0 only):
+            local phase = ""
+            if slot == 0 and b == 0x01 then phase = "  [post-JSM-init / speed-limit induce]"
+            elseif slot == 0 and b == 0xC0 then phase = "  [steady-state → PM]"
+            end
+            t:add(pf.summary, string.format(
+                "%s slot=%X byte0=0x%02X (TC=%d → %s)%s",
+                label, slot, b, tc, slot_name(other), phase))
+        end
+        add_evidence(t, "Code", "janschu99 RNETdictionary.txt:44-45 + POP byte-0 reuse cross-check")
+        return "Hb"
+    elseif cid == 0x181C0D00 or cid == 0x181C0100 then
+        -- Both function bytes 0x0D and 0x01 play tones. Per janschu99
+        -- RNETcanframe_diary.txt:43: "XTD: 0x181c0100  20 50 20 51 20 52
+        -- 20 53  JSM-rx play tones. Fmt: Dd Nn. D=duration 00-7F, N=note
+        -- value 00-9C only 12 notes per lower nibble."
+        return decode_tones(tvb, t)
+    elseif bit.band(cid, 0xFFFFFF00) == 0x1FB00000 then
+        return decode_device_enum(tvb, t, cid)
+    elseif cid == 0x1E80000F then
+        -- Transfer Complete sentinel — end of POP-extended segmented config-
+        -- write. Zero-payload (DLC=0); the information IS the ID. Outside
+        -- the POP-extended namespace by design (it's a protocol-control
+        -- marker, not a POP message).
+        -- Evidence: extract_config_data.py:68-69 (literal handler);
+        -- RNET_PROTOCOL_SPECIFICATION.md §1059; PROJECT_NOTES.md:479.
+        t:add(pf.class, "Transfer Complete sentinel")
+        t:add(pf.summary, "End-of-transfer marker (Programmer)")
+        add_evidence(t, "Code", "extract_config_data.py:68-69 + DongleInterface.dll wire-format §1059")
+        return "XferDone"
+    elseif bit.band(bit.rshift(cid, 18), 0x7E0) == 0x780 then
+        -- POP extended-ID frame. Rigorous membership test from
+        -- DONGLE_INTERFACE_DLL_TYPES.md "Extended (29-bit) CAN ID POP message".
+        -- Replaces the old, narrower 0x1E3C..0x1E8F config-transfer rule.
+        return decode_pop_xtd(tvb, t, cid)
+    elseif bit.band(cid, 0xFFF00000) == 0x1EC00000 then
+        return decode_mode_config(tvb, t, cid)
+    elseif bit.band(cid, 0xFFFFF0FF) == 0x1C2C0000 then
+        -- 0x1C2C family. Function byte (bits 11-8) discriminates:
+        --   0x0D = "Time of Day, little-endian" per janschu99 dictionary
+        --          (RNETdictionary.txt §1c2c0D00).
+        --   0x01-0x04 = per-slot variants [unverified] — structurally similar
+        --               (DLC=6) but byte semantics may differ per slot. Parse
+        --               R3 hypothesizes a per-module-class telemetry.
+        local fb = bit.band(bit.rshift(cid, 8), 0xF)
+        if fb == 0x0D then
+            t:add(pf.class, "Time of Day")
+            if tvb:len() >= 6 then
+                -- LE u48 of the 6 payload bytes
+                local v = 0
+                for i = 5, 0, -1 do v = v * 256 + tvb(i,1):uint() end
+                t:add(pf.summary, string.format(
+                    "Time of Day = 0x%012X (LE, 6 bytes)", v))
+            end
+            add_evidence(t, "Documented", "janschu99 RNETdictionary.txt §1c2c0D00")
+            return "TOD"
+        end
+        t:add(pf.class, "0x1C2C telemetry (per-slot variant) [unverified]")
+        t:add(pf.slot, fb)
+        if tvb:len() >= 1 then t:add(pf.tlm_sample,  tvb(0,1)) end
+        if tvb:len() >= 3 then t:add_le(pf.tlm_counter, tvb(1,2)) end
+        if tvb:len() >= 6 then t:add(pf.tlm_const,   tvb(3,3)) end
+        if tvb:len() >= 6 then
+            t:add(pf.summary, string.format(
+                "0x1C2C[%X] sample=0x%02X bytes1-2=%d const=%02X%02X%02X",
+                fb, tvb(0,1):uint(), tvb(1,2):le_uint(),
+                tvb(3,1):uint(), tvb(4,1):uint(), tvb(5,1):uint()))
+        end
+        add_evidence(t, "Inferred", "hackathon-only observation, slot-variant hypothesis")
+        return "Tlm1C2C"
+    elseif bit.band(cid, 0xFFFF00FF) == 0x181C0000 then
+        -- 0x181C0X00 cJSM/JSM device-class family. Function byte = X.
+        --   0x0D = Audio tones (rnet_utils.py:377) — handled above as a
+        --          specific case.
+        --   0x0F = Periodic announcement [unverified]. Observed in 2026-05-21
+        --          hackathon candump as 102 frames with fully constant
+        --          payload 01 60 80 00 00 00 00 00.
+        --   other = unknown function in this device class.
+        local func = bit.band(bit.rshift(cid, 8), 0xFF)
+        t:add(pf.class, string.format("cJSM/JSM family (function 0x%02X) [unverified]", func))
+        if func == 0x0F and tvb:len() == 8 then
+            t:add(pf.summary, "cJSM/JSM periodic announcement (constant payload)")
+        else
+            t:add(pf.summary, string.format("cJSM/JSM family, function 0x%02X", func))
+        end
+        add_evidence(t, "Inferred", "hackathon-only observation, 0x181C family-analogy")
+        return "cJSMx"
+    elseif cid == 0x0C000005 then
+        -- "PMtx global motor has stopped (0 MPH)" per janschu99 dictionary
+        -- §0C000005. Zero-payload event.
+        t:add(pf.class, "Motor stopped")
+        t:add(pf.summary, "PMtx global: motor stopped (0 MPH)")
+        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt §0C000005")
+        return "MotStop"
+    elseif cid == 0x0C000006 then
+        -- "PMtx global motor is decelerating" per janschu99 dictionary
+        -- §0C000006.
+        t:add(pf.class, "Motor decelerating")
+        t:add(pf.summary, "PMtx global: motor decelerating")
+        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt §0C000006")
+        return "MotDecel"
+    elseif bit.band(cid, 0xFFFF00FF) == 0x0C000000 and tvb:len() == 2 then
+        -- 0x0C00MM00 with 2-byte payload = ILM/lamp-controller (mask, bitmap)
+        -- per janschu99 dictionary line 40 (E=adn+1 case 0x0C000E00, but the
+        -- same 2-byte format is seen for 0x0C000400 = D=adn=4 ILM, and
+        -- 0x0C000500 = secondary controller).
+        local adn = bit.band(bit.rshift(cid, 8), 0xFF)
+        t:add(pf.slot, adn)
+        return decode_lights(tvb, t)
+    elseif bit.band(cid, 0xFFFFFF00) == 0x0C000400 then
+        -- 0x0C0004NN per-indicator action (DLC=0): 01=L turn, 02=R turn,
+        -- 03=hazard, 04=flood. Per dictionary lines 36-39.
+        local action = bit.band(cid, 0xFF)
+        local action_name = ({[0x01]="start L turn signal",
+                              [0x02]="start R turn signal",
+                              [0x03]="start hazard lamps",
+                              [0x04]="start flood lamps"})[action]
+                           or string.format("action 0x%02X", action)
+        t:add(pf.class, "Lamp action")
+        t:add(pf.summary, "JSMtx → ILM: " .. action_name)
+        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt §0C0004NN")
+        return "Lamp"
+    elseif bit.band(cid, 0xFFFF00F0) == 0x0C000000 and bit.band(cid, 0xF) >= 1
+           and bit.band(cid, 0xF) <= 6 and bit.band(bit.rshift(cid, 8), 0xFF) >= 0x01 then
+        -- 0x0C00MM0{1,2,3,4,5,6} for MM != 0x00 and MM != 0x04 = JSM UI
+        -- interaction events for module MM. Per dictionary lines 32-35.
+        -- (0x0C0004XX is handled above; 0x0C000005/06 are motor state.)
+        local mm = bit.band(bit.rshift(cid, 8), 0xFF)
+        local sub = bit.band(cid, 0xF)
+        t:add(pf.class, string.format("JSM UI event (module %d, sub %d) [unverified]", mm, sub))
+        t:add(pf.summary, string.format(
+            "JSMtx UI interaction for module %d (sub 0x%02X)", mm, sub))
+        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt §0C000205/0C000301")
+        return "UIEvent"
+    elseif bit.band(cid, 0xFFFF0000) == 0x0C000000 then
+        return decode_lights(tvb, t)
+    elseif bit.band(cid, 0xFFFFF0FF) == 0x1C300004 then
+        return decode_distance(tvb, t, cid)
+    elseif bit.band(cid, 0xFFFFF0F0) == 0x1C240000 then
+        local slot = bit.band(bit.rshift(cid, 8), 0xF)
+        local state = (bit.band(cid, 0xF) == 0x01) and "ready" or "power down"
+        t:add(pf.class, "Device state")
+        t:add(pf.slot, slot)
+        t:add(pf.summary, string.format("Device slot=%X %s", slot, state))
+        add_evidence(t, "Code", "rnet_utils.py:424")
+        return "DevState"
+    elseif bit.band(cid, 0xFFFFF0F0) == 0x0C180000 then
+        return decode_motor_enable(tvb, t, cid)
+    elseif bit.band(cid, 0xFFFFF0F0) == 0x140C0000 then
+        -- Payload empirically DLC=2: bytes 0-1 are a BE u16 error code.
+        -- Cross-referenced against open-rnet/docs/RNET_ERROR_CODES.md
+        -- (302 entries from "PGDT R-net Error Code List with Remedies v1").
+        local slot = bit.band(bit.rshift(cid, 8), 0xF)
+        t:add(pf.class, "Status / error")
+        t:add(pf.slot, slot)
+        if tvb:len() >= 2 then
+            local code = tvb(0,1):uint() * 256 + tvb(1,1):uint()
+            t:add(pf.err_code, code):set_generated()
+            t:add(pf.err_state, code ~= 0):set_generated()
+            local name = error_codes[code]
+            if name then
+                t:add(pf.err_name, name):set_generated()
+                t:add(pf.summary, string.format(
+                    "⚠ FAULT slot=%X: %s (0x%04X)", slot, name, code))
+            elseif code == 0 then
+                t:add(pf.summary, string.format("Status slot=%X (no fault)", slot))
+            else
+                t:add(pf.summary, string.format(
+                    "⚠ Status slot=%X code=0x%04X (undocumented)", slot, code))
+            end
+        end
+        add_evidence(t, "Code", "rnet_utils.py:437 + docs/RNET_ERROR_CODES.md (302 entries)")
+        return "Status"
+    elseif cid == 0x0C280000 then
+        -- "PM connected" sentinel — sent once by PM after the serial-number
+        -- exchange completes. Per janschu99 RNETdictionary.txt §0C280000.
+        t:add(pf.class, "PM connected")
+        if tvb:len() >= 1 then
+            t:add(pf.summary, string.format("PM connected (flag=0x%02X)", tvb(0,1):uint()))
+        else
+            t:add(pf.summary, "PM connected (DLC=0)")
+        end
+        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt §0C280000")
+        return "PMconn"
+    elseif bit.band(cid, 0xFFFFF0FF) == 0x0C280000 then
+        -- 0x0C280X00 per-slot variants — by analogy to slot-0 "PM connected"
+        -- sentinel, likely module-connected sentinels for slots 1+.
+        local slot = bit.band(bit.rshift(cid, 8), 0xF)
+        t:add(pf.class, string.format("Module connected (slot %X) [unverified]", slot))
+        t:add(pf.slot, slot)
+        if tvb:len() >= 1 then
+            t:add(pf.summary, string.format(
+                "Slot %X connected (flag=0x%02X) [unverified]", slot, tvb(0,1):uint()))
+        end
+        add_evidence(t, "Inferred", "family-analogy to documented 0x0C280000 PM-connected")
+        return "ModConn"
+    elseif bit.band(cid, 0xFFFFF000) == 0x0A400000 then
+        -- BTM (Bluetooth Mouse) family extension. The documented entries
+        -- (0x0A400002/0102 Status 1/2, 0x0A400300/01 Control 1/2) are
+        -- specific cases of this prefix. Variants like 0x0A4002X1 and
+        -- 0x0A400401 appear in captures but aren't documented; treat as
+        -- BTM-family with the function/sub bytes surfaced.
+        local sub = bit.band(cid, 0xFFFF)
+        t:add(pf.class, string.format("BTM family (sub 0x%04X) [unverified]", sub))
+        t:add(pf.summary, string.format("BTM family sub=0x%04X", sub))
+        add_evidence(t, "Inferred", "family-analogy to documented BTM Control/Status")
+        return "BTMx"
+    elseif bit.band(cid, 0xFFFFF0FF) == 0x1C200000 then
+        -- Per janschu99 categorized dictionary line 52:
+        --   "1C200X00#RrSsTtUuVv :JSMrx X=device (don't care). 0x0481000003
+        --    triggers jsm error display... but JoyXY continues"
+        -- So this is a JSM-rx event frame; specific payload 0x0481000003
+        -- triggers an error display (without halting joystick).
+        local slot = bit.band(bit.rshift(cid, 8), 0xF)
+        t:add(pf.class, "JSM-rx event (0x1C20 family)")
+        t:add(pf.slot, slot)
+        if tvb:len() >= 5 then
+            local hex = bytes_to_hex(tvb, 0, 5)
+            if hex == "0481000003" then
+                t:add(pf.summary, "JSM-rx 0x1C20: TRIGGER jsm error display (0481000003)")
+            else
+                t:add(pf.summary, string.format("JSM-rx 0x1C20 slot=%X payload=%s", slot, hex))
+            end
+        end
+        add_evidence(t, "Documented", "janschu99 categorized dictionary line 52 §1C200X00")
+        return "JsmRx1C20"
+    elseif bit.band(cid, 0xFFFFF0FF) == 0x14300001 then
+        -- DLC=1, byte 0 observed at {0, 25, 50, 100} — quartile percentages.
+        -- Hypothesis from external RE notes R3 Q4a: motor-family percentage
+        -- scale, possibly torque-limit or speed-cap. Single-byte. Slot in low
+        -- nibble of bits 11-8 (matching the 0x14300X00 motor-power pattern).
+        local slot = bit.band(bit.rshift(cid, 8), 0xF)
+        t:add(pf.class, "Motor scale [unverified]")
+        t:add(pf.slot, slot)
+        if tvb:len() >= 1 then
+            local v = tvb(0,1):uint()
+            t:add(pf.summary, string.format(
+                "Motor scale slot=%X = %d%% [unverified]", slot, v))
+        end
+        add_evidence(t, "Inferred", "hackathon-only observation")
+        return "MotScl"
+    elseif cid == 0x15000000 then
+        -- 5 occurrences total in hackathon dump, DLC=4, constant payload
+        -- 01 00 01 00. Truly undocumented namespace per external RE notes R3
+        -- reply. Likely event/announcement broadcast; precise semantics open.
+        t:add(pf.class, "Event broadcast (0x15) [unverified]")
+        t:add(pf.summary, "Event broadcast — semantics unknown")
+        add_evidence(t, "Inferred", "hackathon-only observation, no corpus citation")
+        return "Event"
+    elseif bit.band(cid, 0xFFF00000) == 0x1E800000 then
+        -- 0x1E8X = Programmer protocol-control sentinel namespace.
+        -- Outside POP-ext: `(0x1E8X >> 18) & 0x7E0 = 0x7A0 ≠ 0x780`.
+        --
+        -- Structural hypothesis from POP 0x1E8X sentinel namespace notes
+        -- (NOT yet Ghidra-confirmed):
+        --   subtype = bits 18-16 (top nibble after the 0x8):
+        --     0 → Transfer Complete; low nibble of tail = target slot
+        --         (0x1E80000F = slot 15 = Programmer)
+        --     4-5 → Transfer state advance (start? checkpoint?)
+        --     6-7 → Transfer-with-payload-in-ID; low 16 bits =
+        --           opaque value (CRC echo? hash? transfer ID?)
+        local subtype = bit.band(bit.rshift(cid, 16), 0xF)
+        local tail = bit.band(cid, 0xFFFF)
+        local label, summary
+        if subtype == 0 then
+            -- 0x1E80NNNN — Transfer Complete variants
+            label = "Transfer Complete sentinel"
+            if tail == 0x000F then
+                summary = "Transfer Complete → Programmer (slot 15)"
+            else
+                summary = string.format("Transfer Complete (tail=0x%04X) [unverified payload]", tail)
+            end
+        elseif subtype == 4 or subtype == 5 then
+            label = string.format("Transfer state advance (N=%d) [unverified]", subtype)
+            summary = string.format("Sentinel N=%d tail=0x%04X — start/checkpoint hypothesis", subtype, tail)
+        elseif subtype == 6 or subtype == 7 then
+            label = string.format("Transfer-with-payload-in-ID (N=%d) [unverified]", subtype)
+            summary = string.format(
+                "Sentinel N=%d tail=0x%04X — CRC echo / hash / transfer-ID hypothesis",
+                subtype, tail)
+        else
+            label = string.format("0x1E8X sentinel (N=%d) [unverified]", subtype)
+            summary = string.format("Sentinel N=%d tail=0x%04X (subtype semantics TBD)", subtype, tail)
+        end
+        t:add(pf.class, label)
+        t:add(pf.summary, summary)
+        add_evidence(t, "Inferred", "POP 0x1E8X sentinel namespace structural hypothesis")
+        return "Sentinel"
+    else
+        t:add(pf.class, string.format("Unknown XTD 0x%08X", cid))
+        return nil
+    end
+end
+
+-- Main dissector -------------------------------------------------------------
+
+function rnet.dissector(tvb, pinfo, tree)
+    -- Pull CAN metadata from the SocketCAN dissector below us.
+    local fi_id  = f_id()
+    if fi_id == nil then return 0 end          -- not a CAN frame
+    local cid    = fi_id.value
+    local fi_xtd = f_xtd();  local is_xtd = fi_xtd and fi_xtd.value or false
+    local fi_rtr = f_rtr();  local is_rtr = fi_rtr and fi_rtr.value or false
+
+    local t = tree:add(rnet, tvb(), string.format(
+        "R-Net  ID=0x%0" .. (is_xtd and "8" or "3") .. "X  %s%s  len=%d",
+        cid, is_xtd and "XTD" or "STD", is_rtr and " RTR" or "", tvb:len()))
+
+    local tag
+    if is_xtd then
+        tag = decode_xtd(tvb, t, cid, is_rtr)
+    else
+        tag = decode_std(tvb, t, cid, is_rtr)
+    end
+
+    pinfo.cols.protocol = "R-Net"
+    -- Echo the decoded summary into the Info column so users see semantics
+    -- in the packet list. Fallback to a terse tag+ID when no summary was
+    -- generated (e.g. unknown frame classes).
+    local sf = f_summary()
+    if sf and sf.value and sf.value ~= "" then
+        pinfo.cols.info = sf.value
+    elseif tag then
+        pinfo.cols.info = string.format("[%s] ID=0x%X", tag, cid)
+    else
+        pinfo.cols.info = string.format("Unknown ID=0x%X len=%d", cid, tvb:len())
+    end
+    return tvb:len()
+end
+
+
+-- ===========================================================================
+-- BIG LOOKUP TABLES                                                          
+-- ===========================================================================
+-- The three tables below are pure data — error code names, parameter names,
+-- and .rnd memory-address names. They were extracted from various reverse-
+-- engineering sources (see each table's header comment).
+--
+-- They live at the bottom of the file to keep the dissector logic above
+-- readable in one sitting. Forward-declared locals near the top of the
+-- file allow decoder functions to reference them at definition time; the
+-- assignments below rebind those locals at file-load time, before any
+-- packet dissection occurs.
+-- ===========================================================================
+
 -- Auto-generated error catalog: 526 entries merged from:
 --   open-rnet/docs/RNET_ERROR_CODES.md (PGDT 2009-06-01)
 --   rnd_errors_Generic_V*.jsonl (.rnd dealer-programmer extraction)
@@ -304,7 +1572,7 @@ local known_xor_tables = {
 -- field populated. Lookup via wire-code OR code_swapped_hex per
 -- RND_ERROR_PARSER_FIXES_2026-05-22.md (different .rnd sub-tables use
 -- different byte-order conventions; both candidate keys checked).
-local error_codes = {
+error_codes = {
     -- (0x0000 omitted — code=0 means 'no fault' on the wire)
     [0x0001] = "KERNEL WATCHDOG TIME OUT: Kernel task stopped responding",
     [0x0002] = "KERNEL APP. TOO SLOW: Application function took too long",
@@ -1126,44 +2394,12 @@ local error_codes = {
     [0xFFFF] = "Module Error: Module reporting Error may need repair",
 }
 
-
--- Mode-config payload format per Type byte. Evidence:
--- CJSM_DISPLAY_PROTOCOL.md
--- "Mode Configuration Frames" §"Data Types".
-local mode_type_names = {
-    [0x00] = "Initialization",
-    [0x40] = "Configuration header",
-    [0x60] = "Mode parameters",
-    [0x61] = "Extended mode data",
-    [0x62] = "Mode serial / XOR data",
-    [0x80] = "Status",
-    [0xC0] = "Flags",
-    [0xF0] = "End-flags",
-}
-
--- POP register-byte names (data[1] = low byte of ODI). Per
--- RNET_PROTOCOL_SPECIFICATION.md §8.3 Register Types. Most-common values
--- in the corpus are 0x80 PAGE0, 0x81 POINTER, 0x8C TEXT, 0x8F DATA;
--- other 0x8X values appear (0x84, 0x85, 0x88, 0x89, 0x8A, 0x8B) but
--- aren't documented in §8.3.
-local pop_register_names = {
-    [0x80] = "PAGE0",
-    [0x81] = "POINTER",
-    [0x8C] = "TEXT",
-    [0x8F] = "DATA",
-}
--- POP register bytes seen empirically but not in §8.3.
-local pop_register_undocumented = {
-    [0x84] = true, [0x85] = true, [0x86] = true, [0x88] = true,
-    [0x89] = true, [0x8A] = true, [0x8B] = true,
-}
-
 -- Permobil PWC param_id → parameter name map (966 entries)
 -- Source: parameters.json bindings with
 --         space='permobil-pwc-param-id'
 -- Wire mapping (parse discovery): param_id = (byte 6 << 8) | byte 4
 --   of POINTER-register POP frames (data[0]_low_nibble=0x1).
-local pwc_params = {
+pwc_params = {
     [0] = "ALPHA",
     [1] = "Abbreviated",
     [2] = "ALPHANUMERIC",
@@ -2132,7 +3368,6 @@ local pwc_params = {
     [589825] = "PlugAndPlayConfiguration",
 }
 
-
 -- .rnd memory-address lookup. Extracted from the PGDT dealer-Programmer
 -- parameter database (Generic_V33_1_1375 = 2,397 records, plus the
 -- Amylior dealer variant = 2,006 records) via Blowfish decryption +
@@ -2146,7 +3381,7 @@ local pwc_params = {
 -- ODI_CLASS device-class disambiguation still TBD (limitation
 -- #5 in RND_PARAMETER_RECORD_FORMAT.md) — names here are
 -- best-effort across both Generic+Amylior namespaces.
-local rnd_address_names = {
+rnd_address_names = {
     [7] = "SPEED_START_ACCEL",
     [15] = "INDICATOR_FAULT_POWER",
     [53] = "ICS_ELEVATOR_DRV_INHIBIT_HEIGHT",
@@ -3660,1220 +4895,6 @@ local rnd_address_names = {
     [5576] = "ALM_INH_C1_UP_ALARM",
     [5578] = "STABILITY_LIMITING",
 }
-
--- ODI class decode from IRConfigurator.exe ODI_CLASS enum (ilspycmd).
--- The 24-bit ODI in POP data[1..3] decomposes as
--- `class_base[CLASS] + size_offset[SIZE]` plus a separately-added address.
--- Class enum names recovered from IRConfigurator.Device.ODI_CLASS via
--- ilspycmd decompile of IRConfigurator.exe v6.1.2.
-local function decode_odi_class(odi)
-    -- Special case: class 5 SLOT
-    if odi == 0x85 then return "ODI_CLASS_SLOT", 0, "size=0" end
-    if odi == 0x8C then return "ODI_CLASS_SLOT", 0, "size=1-4" end
-    -- Special case: class 6 EVENT
-    if odi >= 0x200 and odi <= 0x203 then
-        return "ODI_CLASS_EVENT", odi - 0x200, string.format("size=%d", odi - 0x200)
-    end
-    -- General case: classes 0-4 with size offset 0..4
-    local bases = {
-        [0] = {0x100, "ODI_CLASS_E2"},   -- EEPROM (non-volatile config)
-        [1] = {0x110, "ODI_CLASS_PORT"}, -- I/O ports
-        [2] = {0x120, "ODI_CLASS_RAM"},  -- working RAM
-        [3] = {0x130, "ODI_CLASS_ROM"},  -- code flash / read-only
-        [4] = {0x140, "ODI_CLASS_ADC"},  -- analog channels
-    }
-    for cls = 0, 4 do
-        local base = bases[cls][1]
-        local name = bases[cls][2]
-        if odi >= base and odi <= base + 4 then
-            return name, odi - base, string.format("size=%d", odi - base)
-        end
-    end
-    return nil, nil, nil
-end
-
--- DIME serial-number decode from DeviceDriver.GetSN() (IRConfigurator.exe).
--- 64-bit DIME → human-readable "LLYYMMNNNN" string (2-letter manufacturer
--- prefix + 2-digit year + 2-digit month + 4-digit per-month sequence).
-local function decode_dime(b0, b1, b2, b3)
-    -- Per GetSN @ DeviceDriver.cs:
-    --   letter2 = ((b1 & 0xC0) >> 6) | ((b2 & 0x07) << 2)
-    --   letter1 = (b2 & 0xFC) >> 3
-    --   year    = b3 / 12 + 4
-    --   month   = b3 % 12 + 1
-    --   seq     = b0 + ((b1 & 0x3F) << 8)
-    local letter2 = bit.bor(bit.rshift(bit.band(b1, 0xC0), 6),
-                            bit.lshift(bit.band(b2, 0x07), 2))
-    local letter1 = bit.rshift(bit.band(b2, 0xFC), 3)
-    -- Defensive: letter indexes 1..26 map to A..Z; anything outside is invalid.
-    if letter1 < 1 or letter1 > 26 or letter2 < 1 or letter2 > 26 then
-        return nil
-    end
-    local year  = math.floor(b3 / 12) + 4
-    local month = (b3 % 12) + 1
-    local seq   = b0 + bit.lshift(bit.band(b1, 0x3F), 8)
-    if month < 1 or month > 12 then return nil end
-    return string.format("%c%c%02d%02d%04d",
-        string.byte("A") + letter1 - 1,
-        string.byte("A") + letter2 - 1,
-        year % 100, month, seq)
-end
-
-local function bytes_to_hex(tvb, off, len)
-    if len <= 0 then return "" end
-    local s = {}
-    for i = 0, len-1 do s[#s+1] = string.format("%02X", tvb(off+i,1):uint()) end
-    return table.concat(s)
-end
-
--- Per-class decoders ---------------------------------------------------------
-
-local function decode_joystick(tvb, t, cid)
-    local slot = bit.band(bit.rshift(cid, 8), 0xF)
-    t:add(pf.class, "Joystick position")
-    t:add(pf.slot, slot)
-    if tvb:len() >= 2 then
-        local x = tvb(0,1):le_int()
-        local y = tvb(1,1):le_int()
-        t:add(pf.joy_x, tvb(0,1))
-        t:add(pf.joy_y, tvb(1,1))
-        -- Add a directional cue so users can scan motion at a glance.
-        local dir = ""
-        if x == 0 and y == 0 then
-            dir = "  (idle)"
-        else
-            local arrow = ""
-            if y < -10 then arrow = arrow .. "↑"
-            elseif y > 10 then arrow = arrow .. "↓" end
-            if x > 10 then arrow = arrow .. "→"
-            elseif x < -10 then arrow = arrow .. "←" end
-            if arrow ~= "" then dir = "  " .. arrow end
-        end
-        t:add(pf.summary, string.format("Joystick X=%+4d Y=%+4d%s", x, y, dir))
-    end
-    add_evidence(t, "Code", "rnet_utils.py:330")
-    return "Joy"
-end
-
-local function decode_speed(tvb, t, cid)
-    local slot = bit.band(bit.rshift(cid, 8), 0xF)
-    t:add(pf.class, "Speed setting")
-    t:add(pf.slot, slot)
-    if tvb:len() >= 1 then
-        local pct = tvb(0,1):uint()
-        t:add(pf.speed_pct, tvb(0,1))
-        t:add(pf.summary, string.format("Speed range %3d%%", pct))
-    end
-    add_evidence(t, "Documented", "janschu99 RNETdictionary.txt:27 + diary:16")
-    return "Speed"
-end
-
-local function decode_battery(tvb, t, cid)
-    local slot = bit.band(bit.rshift(cid, 8), 0xF)
-    t:add(pf.class, "Battery level")
-    t:add(pf.slot, slot)
-    if tvb:len() >= 1 then
-        local pct = tvb(0,1):uint()
-        t:add(pf.batt_pct, tvb(0,1))
-        -- Add a bar visualization so users can scan battery state.
-        local bars = math.floor(pct / 10)
-        local bar = string.rep("█", bars) .. string.rep("░", 10-bars)
-        t:add(pf.summary, string.format("Battery %3d%% %s", pct, bar))
-    end
-    add_evidence(t, "Code", "rnet_utils.py:352")
-    return "Batt"
-end
-
-local function decode_motor_current(tvb, t, cid)
-    -- Per janschu99 categorized dictionary line 83:
-    -- "14300X00#LlHh :PMtx drive motor current. Little-endian 16-bit.
-    --  Instantaneous. Periodic: 200ms. Units of measurement(?) 2e8 = 1.6"
-    -- DLC=2 across all 9,647 frames in corpus (rnet_utils.py:359's DLC>=4
-    -- requirement never fires — see CRC_VERIFICATION_FINDINGS for the bug).
-    local slot = bit.band(bit.rshift(cid, 8), 0xF)
-    t:add(pf.class, "Motor current")
-    t:add(pf.slot, slot)
-    if tvb:len() >= 2 then
-        local v = tvb(0,2):le_uint()
-        t:add_le(pf.motor_left, tvb(0,2))
-        if v == 0 then
-            t:add(pf.summary, string.format("Motor current slot=%X: idle", slot))
-        else
-            t:add(pf.summary, string.format("Motor current slot=%X = %d (LE u16; unit unknown)", slot, v))
-        end
-    end
-    add_evidence(t, "Documented", "janschu99 categorized dictionary line 83 §14300X00")
-    return "MotI"
-end
-
-local function decode_distance(tvb, t, cid)
-    local slot = bit.band(bit.rshift(cid, 8), 0xF)
-    t:add(pf.class, "Distance counter")
-    t:add(pf.slot, slot)
-    if tvb:len() >= 8 then
-        t:add_le(pf.dist_left,  tvb(0,4))
-        t:add_le(pf.dist_right, tvb(4,4))
-    end
-    add_evidence(t, "Code", "rnet_utils.py:415")
-    return "Dist"
-end
-
-local function decode_motor_enable(tvb, t, cid)
-    local slot = bit.band(bit.rshift(cid, 8), 0xF)
-    t:add(pf.class, "Motor enable")
-    t:add(pf.slot, slot)
-    if tvb:len() >= 2 then
-        t:add(pf.motor_en_l, tvb(0,1))
-        t:add(pf.motor_en_r, tvb(1,1))
-    end
-    add_evidence(t, "Code", "rnet_utils.py:430")
-    return "MotEn"
-end
-
-local function decode_horn(tvb, t, cid)
-    local slot = bit.band(bit.rshift(cid, 8), 0xF)
-    local state = (bit.band(cid, 0xF) == 0) and "start" or "stop"
-    t:add(pf.class, "Horn")
-    t:add(pf.slot, slot)
-    t:add(pf.horn_state, state)
-    t:add(pf.summary, string.format("Horn %s slot=%X", state, slot))
-    add_evidence(t, "Code", "rnet_utils.py:346")
-    return "Horn"
-end
-
-local function decode_lights(tvb, t)
-    -- Per janschu99 RNETdictionary.txt:40: byte 0 = mask (commanded
-    -- indicators), byte 1 = bitmap (current indicator state). Bit map:
-    -- 0x01=Left, 0x04=Right, 0x10=Hazard, 0x80=Flood. Bits 1, 3, 5, 6
-    -- not enumerated in the dictionary; bit 6 is observed during the
-    -- "lamp test - all on" payload `D5 D5` (see diary entry) so is a real
-    -- 5th-or-later indicator with identity TBD.
-    local function light_names(b)
-        local on = {}
-        if bit.band(b,0x01)~=0 then on[#on+1] = "Left" end
-        if bit.band(b,0x04)~=0 then on[#on+1] = "Right" end
-        if bit.band(b,0x10)~=0 then on[#on+1] = "Hazard" end
-        if bit.band(b,0x40)~=0 then on[#on+1] = "bit6?" end
-        if bit.band(b,0x80)~=0 then on[#on+1] = "Flood" end
-        return #on > 0 and table.concat(on, "+") or "off"
-    end
-    t:add(pf.class, "Lighting control")
-    if tvb:len() >= 1 then
-        local mask = tvb(0,1):uint()
-        t:add(pf.light_left,  tvb(0,1))
-        t:add(pf.light_bit1,  tvb(0,1))
-        t:add(pf.light_right, tvb(0,1))
-        t:add(pf.light_bit3,  tvb(0,1))
-        t:add(pf.light_haz,   tvb(0,1))
-        t:add(pf.light_bit5,  tvb(0,1))
-        t:add(pf.light_bit6,  tvb(0,1))
-        t:add(pf.light_flood, tvb(0,1))
-        if tvb:len() >= 2 then
-            local bitmap = tvb(1,1):uint()
-            t:add(pf.light_b1, tvb(1,1))
-            t:add(pf.summary, string.format(
-                "Lights mask=%s bitmap=%s%s",
-                light_names(mask), light_names(bitmap),
-                (mask == bitmap) and "" or "  (transitioning)"))
-        else
-            t:add(pf.summary, "Lights mask=" .. light_names(mask) .. " (DLC=1)")
-        end
-    end
-    add_evidence(t, "Documented", "janschu99 RNETdictionary.txt:40")
-    return "Lights"
-end
-
-local function decode_serial_heartbeat(tvb, t)
-    t:add(pf.class, "JSM serial heartbeat")
-    if tvb:len() >= 4 then
-        t:add(pf.serial_bytes, tvb(0, math.min(8, tvb:len())))
-        local sn = bytes_to_hex(tvb, 0, math.min(4, tvb:len()))
-        -- At power-on the JSM emits all-zero serial-heartbeat frames
-        -- before it has loaded its own serial from EEPROM. The real
-        -- serial appears in the subsequent auth-response handshake.
-        -- Label this state explicitly so readers don't think the
-        -- dissector dropped bytes.
-        if sn == "00000000" then
-            t:add(pf.summary, "JSM serial heartbeat (pre-init — serial not yet loaded)")
-        else
-            t:add(pf.summary, string.format("JSM serial=%s", sn))
-        end
-    end
-    add_evidence(t, "Code", "rnet_utils.py:275")
-    return "SerHB"
-end
-
-local function decode_auth(tvb, t, cid, is_rtr)
-    -- 0x1F [SEQ][SLOT] [KEY][VALUE]   (parse_auth_frame_id, line 128)
-    local seq   = bit.band(bit.rshift(cid, 20), 0xF)
-    local slot  = bit.band(bit.rshift(cid, 16), 0xF)
-    local key   = bit.band(bit.rshift(cid,  8), 0xFF)
-    local value = bit.band(cid, 0xFF)
-    t:add(pf.class, is_rtr and "Serial auth — RTR challenge" or "Serial auth — response")
-    t:add(pf.auth_seq, seq)
-    t:add(pf.auth_slot, slot)
-    t:add(pf.auth_key, key)
-    t:add(pf.auth_value, value)
-
-    -- XOR validation: identify the network by key match at seq 0-3 (where
-    -- keys are discriminating). All devices on a network share the same
-    -- xor_table → same derived key for a given seq regardless of slot.
-    -- The value byte is the responding device's serial byte (different per
-    -- slot). seq 4-7 keys can coincidentally collide between networks
-    -- (both Table A and D have 0x45 at seq=7), so we don't use seq>3 for
-    -- network identification.
-    local matched_net = nil
-    if not is_rtr and seq <= 3 then
-        for _, net in ipairs(known_xor_tables) do
-            if net.keys[seq] == key then
-                matched_net = net
-                t:add(pf.auth_valid, true):set_generated()
-                t:add(pf.auth_net, net.name):set_generated()
-                if net.serial and net.serial[seq] == value then
-                    -- JSM-slot match — value also confirms
-                    t:add(pf.summary, string.format(
-                        "Auth response seq=%d slot=%X key=0x%02X val=0x%02X ✓ %s [JSM serial]",
-                        seq, slot, key, value, net.name:match("^([^:]+)")))
-                    add_evidence(t, "Code", "XOR-table cross-check (full JSM serial match)")
-                    return "Auth"
-                end
-                break
-            end
-        end
-    end
-
-    -- Short network tag like "Table B" extracted from full name.
-    local net_tag = ""
-    if matched_net then
-        net_tag = " ✓ " .. matched_net.name:match("^([^:]+)")
-    end
-    if is_rtr then
-        t:add(pf.summary, string.format("Auth challenge seq=%d slot=%X key=0x%02X val=0x%02X [RTR]",
-            seq, slot, key, value))
-    else
-        t:add(pf.summary, string.format("Auth response seq=%d slot=%X key=0x%02X val=0x%02X%s",
-            seq, slot, key, value, net_tag))
-    end
-    add_evidence(t, "Code", "rnet_utils.py:315 + parse_auth_frame_id:128")
-    return "Auth"
-end
-
--- Standard-ID POP frame: (CAN ID & 0x7E0) == 0x780.
--- Byte 0 is a packed (TransferCode, Quick, bit4, OtherNode) tuple; bytes 1-3
--- hold the 24-bit ODI; bytes 4-6 hold a 24-bit Size; byte 7 is the Block
--- counter. Per docs/DONGLE_INTERFACE_DLL_TYPES.md "Standard (11-bit) CAN ID
--- POP message" (CPOPMsg decompile).
-local function decode_pop_std(tvb, t, cid)
-    local this_node = bit.band(cid, 0xF)
-    local dir       = bit.band(bit.rshift(cid, 4), 1)
-    t:add(pf.class, "POP (standard-ID)")
-    t:add(pf.pop_this, this_node)
-    t:add(pf.pop_this_str, slot_name(this_node)):set_generated()
-    t:add(pf.pop_dir, dir)
-
-    if tvb:len() >= 1 then
-        local b0 = tvb(0,1):uint()
-        local tc       = bit.band(bit.rshift(b0, 6), 0x3)
-        local other    = bit.band(b0, 0xF)
-
-        t:add(pf.pop_tc, tc):append_text(string.format("  (bits 7-6 of data[0]=0x%02X)", b0))
-        t:add(pf.pop_tc_str, tc_name(tc, false)):set_generated()
-        t:add(pf.pop_quick, tvb(0,1))
-        t:add(pf.pop_crc,   tvb(0,1))
-        t:add(pf.pop_other, other)
-        t:add(pf.pop_other_str, slot_name(other)):set_generated()
-
-        local is_abort = (tc == 3)
-        t:add(pf.pop_is_abort, is_abort):set_generated()
-
-        local legacy = legacy_label(b0)
-        if legacy then t:add(pf.pop_label, legacy):set_generated() end
-
-        local reg_name = nil
-        if tvb:len() >= 8 then
-            -- ODI = data[1..3] little-endian 24-bit; Size = data[4..6] LE 24-bit;
-            -- Block = data[7]. EXCEPTION: when byte 0 = 0x8F (COMPLETE
-            -- response), bytes 4-5 carry the embedded CRC-16/CCITT-FALSE
-            -- of the just-completed transfer's data, per CPOPMsg::SetCRC @
-            -- 0x10002610 (external RE notes R4 reply). Empirically verified
-            -- against programmer_write capture: 13-byte TEXT data block
-            -- produces CRC 0x6F36 matching frame 270's d[4..5] LE.
-            local odi = tvb(1,1):uint() + tvb(2,1):uint()*256 + tvb(3,1):uint()*65536
-            local sz  = tvb(4,1):uint() + tvb(5,1):uint()*256 + tvb(6,1):uint()*65536
-            t:add(pf.pop_odi,  tvb(1,3), odi)
-            if b0 == 0x8F then
-                -- COMPLETE: bytes 4-5 are the embedded CRC.
-                t:add_le(pf.pop_crc_value, tvb(4,2))
-            else
-                -- For Quick-style frames on documented registers, bytes 4-7
-                -- carry the value/pointer/data being exchanged. The "Size"
-                -- label is correct only for segmented-transfer setup frames
-                -- (TC=1 with CRCFlag=1) — others use this region as data.
-                local reg = tvb(1,1):uint()
-                local is_setup = (tc == 1) and (bit.band(b0, 0x10) ~= 0)
-                if is_setup then
-                    t:add(pf.pop_size, tvb(4,3), sz)
-                else
-                    t:add_le(pf.pop_value16, tvb(4,2))
-                    t:add_le(pf.pop_value32, tvb(4,4))
-                    if reg == 0x81 then
-                        -- POINTER register: byte 4 = pointer-index,
-                        -- byte 6 = sub-index. Per janschu99 dictionary
-                        -- line 14: "78M#2P810000Xx00Vv00 : check if
-                        -- pointer Xx sub Vv exists."
-                        local p_idx = tvb(4,1):uint()
-                        local p_sub = tvb(6,1):uint()
-                        t:add(pf.pop_ptr_idx, tvb(4,1)):set_generated()
-                        t:add(pf.pop_ptr_sub, tvb(6,1)):set_generated()
-                        t:add_le(pf.pop_pointer, tvb(4,2)):set_generated()
-                        -- Parameter cross-reference: empirical wire POINTER
-                        -- (idx, sub) tuples in programmer-attached captures
-                        -- map to permobil-pwc-param-id via
-                        -- param_id = (sub << 8) | idx. E.g. (6,1) =
-                        -- 262 = "BackUp", (14,1) = 270 = "TiltToggle".
-                        --
-                        -- ONLY emit the name when p_sub >= 1, because low
-                        -- param_ids (sub=0, idx<50) have many ambiguous
-                        -- registry bindings (e.g. param_id=2 binds
-                        -- ALPHANUMERIC, BYTE_SEGMENTS, C350...). The
-                        -- sub>=1 range is dominated by Permobil PWC
-                        -- chair-actuator commands which have unique
-                        -- bindings.
-                        local param_id = bit.bor(bit.lshift(p_sub, 8), p_idx)
-                        t:add(pf.pop_ptr_pid, param_id):set_generated()
-                        if p_sub >= 1 then
-                            local name = pwc_params[param_id]
-                            if name then
-                                t:add(pf.pop_ptr_name, name):set_generated()
-                            end
-                        end
-                    end
-                end
-            end
-            t:add(pf.pop_block, tvb(7,1))
-            -- Label the register name when low byte of ODI matches a
-            -- documented §8.3 register and the upper 16 bits are zero
-            -- (i.e. ODI is a "register address" not a memory address).
-            local reg = tvb(1,1):uint()
-            if tvb(2,1):uint() == 0 and tvb(3,1):uint() == 0 then
-                if pop_register_names[reg] then
-                    reg_name = pop_register_names[reg]
-                    t:add(pf.pop_reg_name, reg_name):set_generated()
-                elseif pop_register_undocumented[reg] then
-                    reg_name = string.format("0x%02X (undocumented 0x8X register)", reg)
-                    t:add(pf.pop_reg_name, reg_name):set_generated()
-                end
-            end
-            -- ODI class decode (IRConfigurator.exe ODI_CLASS enum (ilspycmd)):
-            -- the 24-bit ODI can be split into a class + address pair.
-            local odi_cls, odi_addr, _ = decode_odi_class(odi)
-            if odi_cls then
-                t:add(pf.pop_odi_class, odi_cls):set_generated()
-                t:add(pf.pop_odi_addr,  odi_addr):set_generated()
-                if not reg_name then
-                    reg_name = string.format("%s[0x%02X]",
-                        odi_cls:gsub("^ODI_CLASS_", ""), odi_addr)
-                end
-            end
-            -- .rnd memory-address fallback: when ODI is NOT a register
-            -- opcode (data[1] not 0x80-0x8F with zero upper bytes) and
-            -- data[3]=0, treat data[1..2] as a 16-bit memory address and
-            -- look it up in the .rnd parameter table. The hit rate is
-            -- low (~14%) and ODI_CLASS isn't yet disambiguated, but the
-            -- hits that do land are semantically coherent (consecutive
-            -- channel/button parameters). Only fires when no reg_name
-            -- was already assigned, so it never overrides register-based
-            -- labels.
-            if reg_name == nil and tvb(3,1):uint() == 0 then
-                local cand = tvb(1,1):uint() + tvb(2,1):uint() * 256
-                if cand ~= 0 then
-                    local addr_name = rnd_address_names[cand]
-                    if addr_name then
-                        t:add(pf.pop_addr_name, addr_name):set_generated()
-                        reg_name = string.format(".rnd[0x%04X]=%s", cand, addr_name)
-                    end
-                end
-            end
-        end
-
-        -- For POP frames touching the TEXT register (0x8C), if bytes 4-7
-        -- are printable ASCII the payload is a cJSM display string chunk.
-        -- Per janschu99 dictionary line 17: "79M#2P8C0000asciitxt :PMtx
-        -- text chunk used for cJSM display messages."
-        -- Excludes COMPLETE (b0=0x8F) because bytes 4-5 there are the CRC.
-        local ascii_text = nil
-        if reg_name == "TEXT" and tvb:len() >= 8 and b0 ~= 0x8F then
-            local s = ""
-            local printable = 0
-            for i = 4, 7 do
-                local c = tvb(i,1):uint()
-                if c >= 0x20 and c < 0x7F then
-                    s = s .. string.char(c)
-                    printable = printable + 1
-                elseif c == 0 then
-                    s = s .. "·"  -- null
-                else
-                    s = s .. "?"
-                end
-            end
-            if printable >= 1 then ascii_text = s end
-        end
-
-        -- Compact form: op-name when known, fall back to TC label.
-        local op = legacy or tc_name(tc, false)
-        local reg_str    = reg_name and (" reg="..reg_name) or ""
-        local text_str   = ascii_text and string.format("  text=\"%s\"", ascii_text) or ""
-        local extra_str  = ""
-        if b0 == 0x8F and tvb:len() >= 6 then
-            -- COMPLETE: bytes 4-5 = embedded CRC
-            extra_str = string.format("  CRC=0x%04X", tvb(4,2):le_uint())
-        elseif tvb:len() >= 8 then
-            local reg = tvb(1,1):uint()
-            local is_setup = (tc == 1) and (bit.band(b0, 0x10) ~= 0)
-            if not is_setup then
-                -- Show the value/pointer that's being exchanged.
-                local v16 = tvb(4,2):le_uint()
-                local v32 = tvb(4,4):le_uint()
-                if reg == 0x81 and bit.band(v32, 0xFF00FF00) == 0 and v32 ~= 0 then
-                    -- POINTER frame in (idx, 0, sub, 0) layout. Suppress
-                    -- the PWC name for sub=0 (low param_ids have ambiguous
-                    -- bindings) — only label sub>=1 actuator-command space.
-                    local idx = tvb(4,1):uint()
-                    local sub = tvb(6,1):uint()
-                    local pid = bit.bor(bit.lshift(sub, 8), idx)
-                    local pname = (sub >= 1) and pwc_params[pid] or nil
-                    if sub ~= 0 then
-                        extra_str = string.format("  ptr=%d.%d (param %d%s)",
-                            idx, sub, pid,
-                            pname and (": " .. pname) or "")
-                    else
-                        extra_str = string.format("  ptr=%d", idx)
-                    end
-                elseif reg == 0x81 and v16 ~= 0 then
-                    -- POINTER fallback (data layout not matching idx/sub)
-                    extra_str = string.format("  ptr=0x%04X", v16)
-                elseif reg == 0x8F and not ascii_text then
-                    -- Data value
-                    if v32 < 0x10000 then
-                        extra_str = string.format("  value=0x%04X (%d)", v16, v16)
-                    else
-                        extra_str = string.format("  value=0x%08X", v32)
-                    end
-                end
-            end
-        end
-        t:add(pf.summary, string.format(
-            "POP %s→%s  %s%s%s%s",
-            slot_name(this_node), slot_name(other),
-            op, reg_str, text_str, extra_str))
-    end
-    add_evidence(t, "Code", "DongleInterface.dll CPOPMsg class (Ghidra)")
-    return "POPstd"
-end
-
--- Extended-ID POP frame: ((CAN ID >> 18) & 0x7E0) == 0x780.
--- Bits 21-18 = node (4), 17-16 = TC (2), 15-0 = SegmentNumber. All 8 data
--- bytes are segment payload — no command byte. Per same source.
-local function decode_pop_xtd(tvb, t, cid)
-    local node    = bit.band(bit.rshift(cid, 18), 0xF)
-    local tc      = bit.band(bit.rshift(cid, 16), 0x3)
-    local seg     = bit.band(cid, 0xFFFF)
-    t:add(pf.class, "POP (extended-ID)")
-    t:add(pf.pop_this, node)
-    t:add(pf.pop_this_str, slot_name(node)):set_generated()
-    t:add(pf.pop_tc, tc)
-    t:add(pf.pop_tc_str, tc_name(tc, true)):set_generated()
-    t:add(pf.pop_segment, seg)
-    t:add(pf.pop_is_last, (tc == 3)):set_generated()
-    t:add(pf.summary, string.format(
-        "POP-ext to %s  %s  seg=%d",
-        slot_name(node), tc_name(tc, true), seg))
-    add_evidence(t, "Code", "DongleInterface.dll CPOPMsg class (Ghidra)")
-    return "POPxtd"
-end
-
--- Mode-configuration frame: XTD ID 0x1ECMMSST where MM = mode index,
--- SS = sub-address, T = data-type nibble (00/40/60/61/62/80/C0/F0). Per
--- CJSM_DISPLAY_PROTOCOL.md
--- "Mode Configuration Frames" + RNET_PROTOCOL_SPECIFICATION.md §11.
-local function decode_mode_config(tvb, t, cid)
-    -- Mode index is one nibble (bits 19-16). Sub-address (bits 15-8) and
-    -- Type (bits 7-0) are each one full byte.
-    --
-    -- Per-Type payload format from CJSM_DISPLAY_PROTOCOL.md:
-    --   Type 0x40 (config header): payload like `01 03 00 00 00 00 00 00`
-    --   Type 0x60 (mode parameters): raw mode-parameter block
-    --   Type 0x61 (extended mode data) — known sub-fields:
-    --     Bytes 0-1: Slot/index prefix
-    --     Bytes 2-3: Data type (0x80=button, 0x40=action)
-    --     Bytes 4-5: Address/parameter ID
-    --     Bytes 6-7: Value
-    --   Type 0x62 (mode XOR/serial data): mode-specific serial bytes
-    --   Type 0x80 (status): usually all zeros
-    --   Type 0xC0, 0xF0 (flags): like `01 00 00 00 00 00 00 00`
-    local mode    = bit.band(bit.rshift(cid, 16), 0xF)
-    local subaddr = bit.band(bit.rshift(cid,  8), 0xFF)
-    local typ     = bit.band(cid, 0xFF)
-    t:add(pf.class, "Mode configuration")
-    t:add(pf.mode_idx, mode)
-    t:add(pf.mode_subaddr, subaddr)
-    t:add(pf.mode_type, typ)
-    t:add(pf.mode_type_s, mode_type_names[typ] or string.format("Unknown type 0x%02X", typ)):set_generated()
-
-    local detail = ""
-    if typ == 0x40 and tvb:len() >= 8 then
-        -- Configuration header. CJSM doc gives example payload
-        -- `01 03 00 00 00 00 00 00`. Bytes 0-1 look like a header tag.
-        detail = string.format("  hdr=%02X%02X reserved=%02X%02X%02X%02X%02X%02X",
-            tvb(0,1):uint(), tvb(1,1):uint(),
-            tvb(2,1):uint(), tvb(3,1):uint(), tvb(4,1):uint(),
-            tvb(5,1):uint(), tvb(6,1):uint(), tvb(7,1):uint())
-    elseif typ == 0x60 and tvb:len() >= 8 then
-        -- Mode parameters: raw 8-byte block. Show as hex.
-        detail = "  params=" .. bytes_to_hex(tvb, 0, 8)
-    elseif typ == 0x61 and tvb:len() >= 8 then
-        -- Extended mode data per cJSM display-protocol notes. Per
-        -- external RE notes R3.5 F6: byte order is MIXED — example payload
-        -- 0001028000400200 decodes only if bytes 2-3 are BE and bytes 6-7
-        -- are LE (different fields owned by different protocol layers).
-        -- Bytes 0-1 layout is ambiguous in the doc; show as raw pair.
-        local b0, b1    = tvb(0,1):uint(), tvb(1,1):uint()
-        local data_type = tvb(2,1):uint() * 256 + tvb(3,1):uint()  -- BE
-        local addr      = tvb(4,1):uint() * 256 + tvb(5,1):uint()  -- BE per doc example
-        local value     = tvb(6,1):uint() + tvb(7,1):uint() * 256  -- LE per doc example
-        local dt_name = (data_type == 0x0280) and "button" or
-                        (data_type == 0x0040) and "action" or
-                        string.format("0x%04X", data_type)
-        detail = string.format("  pfx=%02X%02X type=%s(BE) addr=0x%04X(BE) value=0x%04X(LE) [mixed-endian]",
-                               b0, b1, dt_name, addr, value)
-    elseif typ == 0x62 and tvb:len() >= 8 then
-        -- Mode XOR / serial data: show as hex (per-mode XOR key fragment).
-        detail = "  xor_data=" .. bytes_to_hex(tvb, 0, 8)
-    elseif (typ == 0xC0 or typ == 0xF0) and tvb:len() >= 1 then
-        -- Flags: typically `01 00 ...` per CJSM doc.
-        detail = string.format("  flag=0x%02X", tvb(0,1):uint())
-    end
-
-    t:add(pf.summary, string.format("ModeCfg mode=%d subaddr=0x%02X type=0x%02X (%s)%s",
-        mode, subaddr, typ, mode_type_names[typ] or "?", detail))
-    add_evidence(t, "Code", "cJSM display-protocol notes §Mode Configuration Frames + empirical Type-0x61 decode")
-    return "ModeCfg"
-end
-
-local function decode_tones(tvb, t)
-    t:add(pf.class, "Tones / buzzer")
-    if tvb:len() >= 2 then
-        local out = {}
-        for i = 0, tvb:len()-1, 2 do
-            if i+1 < tvb:len() then
-                out[#out+1] = string.format("L%d:N%d", tvb(i,1):uint(), tvb(i+1,1):uint())
-            end
-        end
-        local s = table.concat(out, " ")
-        t:add(pf.tones, s)
-        t:add(pf.summary, "Tones: " .. s)
-    end
-    add_evidence(t, "Code", "rnet_utils.py:377")
-    return "Tone"
-end
-
-local function decode_device_enum(tvb, t, cid)
-    local slot = bit.band(cid, 0xF)
-    t:add(pf.class, "Device enumeration")
-    t:add(pf.slot, slot)
-    if tvb:len() >= 8 then
-        t:add(pf.serial_bytes, tvb(0, 8))
-        -- Decode as DIME → human-readable "LLYYMMNNNN" per
-        -- DeviceDriver.GetSN() (IRConfigurator.exe decompile).
-        local dime = decode_dime(tvb(0,1):uint(), tvb(1,1):uint(),
-                                  tvb(2,1):uint(), tvb(3,1):uint())
-        if dime then
-            t:add(pf.dime_serial, dime):set_generated()
-            t:add(pf.summary, string.format("Device slot=%X serial=%s (raw=%s)",
-                slot, dime, bytes_to_hex(tvb, 0, 8)))
-        else
-            t:add(pf.summary, string.format("Device slot=%X serial=%s",
-                slot, bytes_to_hex(tvb, 0, 8)))
-        end
-    end
-    add_evidence(t, "Code", "rnet_utils.py:389 + DeviceDriver.GetSN decompile")
-    return "DevEnum"
-end
-
--- Standard-frame (11-bit) decoders -------------------------------------------
--- All rules below are from rnet_utils.py:decode_frame() (lines 269-310).
-
-local function decode_std(tvb, t, cid, is_rtr)
-    if cid == 0x000 then
-        t:add(pf.class, is_rtr and "Sleep all devices" or "Sleep command")
-        t:add(pf.summary, is_rtr and "Sleep all (RTR)" or "Sleep cmd")
-        add_evidence(t, "Code", "rnet_utils.py:271")
-        return "Sleep"
-    elseif cid == 0x002 then
-        -- [unverified] dictionary §1 (RNET_FRAME_DICTIONARY.md): "PM sleep all
-        -- (alternate) / Seen during JSM init". Not in runnable decoder.
-        local desc = is_rtr and "PM sleep all (alternate)" or "Seen during JSM init"
-        t:add(pf.class, desc .. " [unverified]")
-        add_evidence(t, "Inferred", "frame_dict §1 family-analogy")
-        return "Sleep2"
-    elseif cid == 0x004 then
-        -- [unverified] dictionary §1
-        local desc = is_rtr and "Sleep/wake sequence" or "JSM sleep commencing"
-        t:add(pf.class, desc .. " [unverified]")
-        add_evidence(t, "Inferred", "frame_dict §1 family-analogy")
-        return "Sleep4"
-    elseif cid == 0x00C then
-        t:add(pf.class, "Network test")
-        add_evidence(t, "Code", "rnet_utils.py:273")
-        return "NetTest"
-    elseif cid == 0x00E then
-        return decode_serial_heartbeat(tvb, t)
-    elseif cid == 0x040 then
-        t:add(pf.class, "Open parameter page")
-        add_evidence(t, "Code", "rnet_utils.py:279")
-        return "OpenParam"
-    elseif cid == 0x041 then
-        t:add(pf.class, "Close parameter page")
-        add_evidence(t, "Code", "rnet_utils.py:281")
-        return "CloseParam"
-    elseif cid == 0x050 then
-        -- Per janschu99 dictionary line 10: `050#Ss0M00XX` JSMrx,
-        -- "appears to be in same format as 060#Ss0M00XX" — attribute Ss of
-        -- mode M as data XX.
-        t:add(pf.class, "Mode map (JSMrx)")
-        if tvb:len() >= 4 then
-            local ss = tvb(0,1):uint()
-            local m  = bit.band(tvb(1,1):uint(), 0xF)
-            local xx = tvb(3,1):uint()
-            t:add(pf.summary, string.format(
-                "Mode map: attribute=0x%02X mode=%d data=0x%02X", ss, m, xx))
-        end
-        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt:10")
-        return "ModeMap"
-    elseif cid == 0x060 then
-        -- 0x060 has two documented uses:
-        --   Per janschu99 dictionary line 13: `060#Ss0M00XX` JSMrx return
-        --     attribute Ss of mode M as data XX.
-        --   Per janschu99 diary lines 10-12: PM-tx joystick-event for
-        --     specific profiles (DriveProfile / LiftProfile / chairAngle):
-        --       060#90000000 = DriveProfile joystick event stop
-        --       060#90010040 = LiftProfile joystick event start
-        --       060#90010000 = LiftProfile joystick event stop
-        --       060#90010040 = chairAngle motor running (categorized:56-57)
-        --       060#90010000 = chairAngle motor stopped
-        t:add(pf.class, "Mode attribute / joystick event (0x060)")
-        if tvb:len() >= 4 then
-            local b0 = tvb(0,1):uint()
-            local b1 = tvb(1,1):uint()
-            local b3 = tvb(3,1):uint()
-            if b0 == 0x90 then
-                local profile = (b1 == 0x00) and "Drive" or (b1 == 0x01) and "Lift/chairAngle" or string.format("0x%02X", b1)
-                local state = (b3 == 0x40) and "running/start" or (b3 == 0x00) and "stopped/stop" or string.format("0x%02X", b3)
-                t:add(pf.summary, string.format("PMtx %s joystick event: %s", profile, state))
-            else
-                local m = bit.band(b1, 0xF)
-                t:add(pf.summary, string.format(
-                    "JSMrx mode attribute: Ss=0x%02X mode=%d data=0x%02X", b0, m, b3))
-            end
-        end
-        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt:13 + diary:10-12 + categorized:56-57")
-        return "ModeAttr"
-    elseif cid == 0x051 then
-        -- Per janschu99 dictionary line 9: `051#004M0000` JSMtx select
-        -- profile M.
-        t:add(pf.class, "JSMtx select profile")
-        if tvb:len() >= 2 then
-            local m = bit.band(tvb(1,1):uint(), 0xF)
-            t:add(pf.summary, string.format("Select profile %d", m))
-        end
-        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt:9")
-        return "SelProf"
-    elseif cid == 0x061 then
-        -- Per janschu99 dictionary lines 11-12:
-        --   061#404M0000 = suspend mode M
-        --   061#004M0000 = select mode M (last mode must be suspended first)
-        t:add(pf.class, "Mode control")
-        if tvb:len() >= 2 then
-            local b0 = tvb(0,1):uint()
-            local m  = bit.band(tvb(1,1):uint(), 0xF)
-            if b0 == 0x40 then
-                t:add(pf.summary, string.format("Suspend mode %d", m))
-            elseif b0 == 0x00 then
-                t:add(pf.summary, string.format("Select mode %d", m))
-            else
-                t:add(pf.summary, string.format("Mode control byte0=0x%02X mode=%d", b0, m))
-            end
-        end
-        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt:11-12")
-        return "ModeCtl"
-    elseif bit.band(cid, 0x7E0) == 0x780 then
-        -- POP standard-ID frame (any of 0x780..0x79F).
-        return decode_pop_std(tvb, t, cid)
-    elseif cid == 0x7A0 then
-        -- Programmer presence announcement. Sent by the Programmer when it
-        -- joins the bus. Per frame-class glossary notes +
-        -- open-rnet UPD_HUNT_AND_POP_FINDING.md.
-        t:add(pf.class, "Programmer presence")
-        t:add(pf.summary, "Programmer presence announcement")
-        add_evidence(t, "Documented", "frame-class glossary notes + UPD_HUNT_AND_POP_FINDING.md")
-        return "ProgHere"
-    elseif cid == 0x7B0 then
-        t:add(pf.class, "Config mode 0")
-        add_evidence(t, "Code", "rnet_utils.py:303")
-        return "Cfg0"
-    elseif cid == 0x7B1 then
-        t:add(pf.class, "Config mode 1")
-        add_evidence(t, "Code", "rnet_utils.py:305")
-        return "Cfg1"
-    elseif cid == 0x7B3 then
-        t:add(pf.class, is_rtr and "Serial exchange request" or "Serial exchange")
-        add_evidence(t, "Code", "rnet_utils.py:307")
-        return "SerExch"
-    elseif cid >= 0x040 and cid <= 0x04F then
-        -- Param-page family extension. 0x040/041 documented (open/close).
-        -- 042-04F are not documented but cluster tightly with the documented
-        -- pair. Round-3 reply suggested by analogy these are intermediate
-        -- param-page operations.
-        local fn = cid - 0x040
-        t:add(pf.class, string.format("Param-page family (fn 0x%X) [unverified]", fn))
-        t:add(pf.summary, string.format("Param-page family, function 0x%X", fn))
-        add_evidence(t, "Inferred", "family-analogy to documented 0x040/0x041")
-        return "ParamX"
-    elseif cid >= 0x050 and cid <= 0x05F then
-        -- Mode-map family extension. 0x050 documented as "Mode map" per
-        -- rnet_utils.py:283; 051-05F are family variants by analogy.
-        local fn = cid - 0x050
-        t:add(pf.class, string.format("Mode-map family (fn 0x%X) [unverified]", fn))
-        t:add(pf.summary, string.format("Mode-map family, function 0x%X", fn))
-        add_evidence(t, "Inferred", "family-analogy to documented 0x050 Mode map")
-        return "ModeMapX"
-    elseif cid >= 0x060 and cid <= 0x06F then
-        -- Mode-family extension. 0x060 = Mode request (R3 evidenced);
-        -- 0x061 = Mode control (rnet_utils.py:285); 062-06F by analogy.
-        local fn = cid - 0x060
-        t:add(pf.class, string.format("Mode family (fn 0x%X) [unverified]", fn))
-        t:add(pf.summary, string.format("Mode family, function 0x%X", fn))
-        add_evidence(t, "Inferred", "family-analogy to documented 0x060/0x061")
-        return "ModeFamX"
-    elseif cid >= 0x7B0 and cid <= 0x7BF then
-        -- Config-mode family extension. 0x7B0/7B1/7B3 documented in
-        -- rnet_utils.py. 7B2/7B4-7BF by analogy.
-        local fn = cid - 0x7B0
-        t:add(pf.class, string.format("Config-mode family (fn 0x%X) [unverified]", fn))
-        t:add(pf.summary, string.format("Config-mode family, function 0x%X", fn))
-        add_evidence(t, "Inferred", "family-analogy to documented 0x7B0/0x7B1/0x7B3")
-        return "CfgFamX"
-    else
-        t:add(pf.class, string.format("Unknown STD 0x%03X", cid))
-        return nil
-    end
-end
-
--- Extended-frame (29-bit) decoders -------------------------------------------
--- Rules from rnet_utils.py:decode_frame() lines 313-442.
-
-local function decode_xtd(tvb, t, cid, is_rtr)
-    -- Specific 0x1FB000XX device-enum check BEFORE the generic 0x1F auth
-    -- rule, since 0x1FB000XX shares the 0x1F top byte but is a different
-    -- frame class (8-byte DIME serial payload, not (key, value)).
-    if bit.band(cid, 0xFFFFFF00) == 0x1FB00000 then
-        return decode_device_enum(tvb, t, cid)
-    elseif bit.rshift(cid, 24) == 0x1F then
-        return decode_auth(tvb, t, cid, is_rtr)
-    elseif bit.band(cid, 0xFFFFF0FF) == 0x02000000 then
-        return decode_joystick(tvb, t, cid)
-    elseif bit.band(cid, 0xFFFFF0FF) == 0x0A040000 then
-        return decode_speed(tvb, t, cid)
-    elseif cid == 0x0A400300 or cid == 0x0A400301 then
-        -- BTMouse (Bluetooth Mouse module) Control 1/2.
-        -- Evidenced: DongleInterface.dll wire-format notes §14.2 (line
-        -- 890-891), corroborated in DEVICE_SERIALS.md §BTMouse.
-        local n = (cid == 0x0A400300) and 1 or 2
-        t:add(pf.class, string.format("BTM Control %d", n))
-        t:add(pf.summary, string.format("BTMouse Control %d", n))
-        add_evidence(t, "Code", "DongleInterface.dll wire-format notes §14.2")
-        return "BTMctl"
-    elseif cid == 0x0A400002 or cid == 0x0A400102 then
-        -- BTMouse Status 1/2 — same family, §14.2.
-        local n = (cid == 0x0A400002) and 1 or 2
-        t:add(pf.class, string.format("BTM Status %d", n))
-        t:add(pf.summary, string.format("BTMouse Status %d", n))
-        add_evidence(t, "Code", "DongleInterface.dll wire-format notes §14.2")
-        return "BTMstat"
-    elseif bit.band(cid, 0xFFFFF0F0) == 0x0C040000 then
-        return decode_horn(tvb, t, cid)
-    elseif bit.band(cid, 0xFFFFF0FF) == 0x1C0C0000 then
-        return decode_battery(tvb, t, cid)
-    elseif bit.band(cid, 0xFFFFF0FF) == 0x14300000 then
-        return decode_motor_current(tvb, t, cid)
-    elseif cid == 0x03C30F0F then
-        -- Payload empirically constant `87 87 87 87 87 87 87 00` across
-        -- 500/500 hackathon-dump samples + open-rnet captures. Treat as
-        -- "JSM alive signature" with a validation check.
-        t:add(pf.class, "JSM heartbeat")
-        local valid = false
-        if tvb:len() >= 7 then
-            valid = true
-            for i = 0, 6 do
-                if tvb(i,1):uint() ~= 0x87 then valid = false; break end
-            end
-        end
-        t:add(pf.jsm_signature, valid):set_generated()
-        t:add(pf.summary, valid and "JSM heartbeat (signature 87×7 OK, 100ms periodic)"
-                                or "JSM heartbeat (UNEXPECTED PAYLOAD)")
-        add_evidence(t, "Code", "janschu99 RNETdictionary.txt:26 + empirical 500/500 corroboration")
-        return "JSMhb"
-    elseif bit.band(cid, 0xFFFFF0FF) == 0x0C140000 then
-        -- 0x0C14[slot]00 = module-emitted heartbeat. Originally documented
-        -- as "PM heartbeat" (janschu99 line 44, slot=0 case) but the family
-        -- is per-emitter: slot 0 (PM) is the documented case; slot 4 (ILM
-        -- per default map) has its own variant per janschu99 line 45
-        -- ("0C140400#82 :(?) Periodic: 1000ms. Lamp controller(?)").
-        -- Byte 0 reuses the documented POP byte-0 bit-packing (TC + OtherNode).
-        local slot = bit.band(bit.rshift(cid, 8), 0xF)
-        local label = (slot == 0) and "PM heartbeat" or
-                      string.format("%s heartbeat", slot_name(slot))
-        t:add(pf.class, label)
-        t:add(pf.slot, slot)
-        if tvb:len() >= 1 then
-            local b     = tvb(0,1):uint()
-            local tc    = bit.band(bit.rshift(b, 6), 0x3)
-            local other = bit.band(b, 0xF)
-            t:add(pf.pm_status_byte, tvb(0,1))
-            t:add(pf.pop_tc,    tc)
-            t:add(pf.pop_quick, tvb(0,1))
-            t:add(pf.pop_crc,   tvb(0,1))
-            t:add(pf.pop_other, other)
-            t:add(pf.pop_other_str, slot_name(other)):set_generated()
-            -- Documented phase markers (diary 34-35, slot 0 only):
-            local phase = ""
-            if slot == 0 and b == 0x01 then phase = "  [post-JSM-init / speed-limit induce]"
-            elseif slot == 0 and b == 0xC0 then phase = "  [steady-state → PM]"
-            end
-            t:add(pf.summary, string.format(
-                "%s slot=%X byte0=0x%02X (TC=%d → %s)%s",
-                label, slot, b, tc, slot_name(other), phase))
-        end
-        add_evidence(t, "Code", "janschu99 RNETdictionary.txt:44-45 + POP byte-0 reuse cross-check")
-        return "Hb"
-    elseif cid == 0x181C0D00 or cid == 0x181C0100 then
-        -- Both function bytes 0x0D and 0x01 play tones. Per janschu99
-        -- RNETcanframe_diary.txt:43: "XTD: 0x181c0100  20 50 20 51 20 52
-        -- 20 53  JSM-rx play tones. Fmt: Dd Nn. D=duration 00-7F, N=note
-        -- value 00-9C only 12 notes per lower nibble."
-        return decode_tones(tvb, t)
-    elseif bit.band(cid, 0xFFFFFF00) == 0x1FB00000 then
-        return decode_device_enum(tvb, t, cid)
-    elseif cid == 0x1E80000F then
-        -- Transfer Complete sentinel — end of POP-extended segmented config-
-        -- write. Zero-payload (DLC=0); the information IS the ID. Outside
-        -- the POP-extended namespace by design (it's a protocol-control
-        -- marker, not a POP message).
-        -- Evidence: extract_config_data.py:68-69 (literal handler);
-        -- RNET_PROTOCOL_SPECIFICATION.md §1059; PROJECT_NOTES.md:479.
-        t:add(pf.class, "Transfer Complete sentinel")
-        t:add(pf.summary, "End-of-transfer marker (Programmer)")
-        add_evidence(t, "Code", "extract_config_data.py:68-69 + DongleInterface.dll wire-format §1059")
-        return "XferDone"
-    elseif bit.band(bit.rshift(cid, 18), 0x7E0) == 0x780 then
-        -- POP extended-ID frame. Rigorous membership test from
-        -- DONGLE_INTERFACE_DLL_TYPES.md "Extended (29-bit) CAN ID POP message".
-        -- Replaces the old, narrower 0x1E3C..0x1E8F config-transfer rule.
-        return decode_pop_xtd(tvb, t, cid)
-    elseif bit.band(cid, 0xFFF00000) == 0x1EC00000 then
-        return decode_mode_config(tvb, t, cid)
-    elseif bit.band(cid, 0xFFFFF0FF) == 0x1C2C0000 then
-        -- 0x1C2C family. Function byte (bits 11-8) discriminates:
-        --   0x0D = "Time of Day, little-endian" per janschu99 dictionary
-        --          (RNETdictionary.txt §1c2c0D00).
-        --   0x01-0x04 = per-slot variants [unverified] — structurally similar
-        --               (DLC=6) but byte semantics may differ per slot. Parse
-        --               R3 hypothesizes a per-module-class telemetry.
-        local fb = bit.band(bit.rshift(cid, 8), 0xF)
-        if fb == 0x0D then
-            t:add(pf.class, "Time of Day")
-            if tvb:len() >= 6 then
-                -- LE u48 of the 6 payload bytes
-                local v = 0
-                for i = 5, 0, -1 do v = v * 256 + tvb(i,1):uint() end
-                t:add(pf.summary, string.format(
-                    "Time of Day = 0x%012X (LE, 6 bytes)", v))
-            end
-            add_evidence(t, "Documented", "janschu99 RNETdictionary.txt §1c2c0D00")
-            return "TOD"
-        end
-        t:add(pf.class, "0x1C2C telemetry (per-slot variant) [unverified]")
-        t:add(pf.slot, fb)
-        if tvb:len() >= 1 then t:add(pf.tlm_sample,  tvb(0,1)) end
-        if tvb:len() >= 3 then t:add_le(pf.tlm_counter, tvb(1,2)) end
-        if tvb:len() >= 6 then t:add(pf.tlm_const,   tvb(3,3)) end
-        if tvb:len() >= 6 then
-            t:add(pf.summary, string.format(
-                "0x1C2C[%X] sample=0x%02X bytes1-2=%d const=%02X%02X%02X",
-                fb, tvb(0,1):uint(), tvb(1,2):le_uint(),
-                tvb(3,1):uint(), tvb(4,1):uint(), tvb(5,1):uint()))
-        end
-        add_evidence(t, "Inferred", "hackathon-only observation, slot-variant hypothesis")
-        return "Tlm1C2C"
-    elseif bit.band(cid, 0xFFFF00FF) == 0x181C0000 then
-        -- 0x181C0X00 cJSM/JSM device-class family. Function byte = X.
-        --   0x0D = Audio tones (rnet_utils.py:377) — handled above as a
-        --          specific case.
-        --   0x0F = Periodic announcement [unverified]. Observed in 2026-05-21
-        --          hackathon candump as 102 frames with fully constant
-        --          payload 01 60 80 00 00 00 00 00.
-        --   other = unknown function in this device class.
-        local func = bit.band(bit.rshift(cid, 8), 0xFF)
-        t:add(pf.class, string.format("cJSM/JSM family (function 0x%02X) [unverified]", func))
-        if func == 0x0F and tvb:len() == 8 then
-            t:add(pf.summary, "cJSM/JSM periodic announcement (constant payload)")
-        else
-            t:add(pf.summary, string.format("cJSM/JSM family, function 0x%02X", func))
-        end
-        add_evidence(t, "Inferred", "hackathon-only observation, 0x181C family-analogy")
-        return "cJSMx"
-    elseif cid == 0x0C000005 then
-        -- "PMtx global motor has stopped (0 MPH)" per janschu99 dictionary
-        -- §0C000005. Zero-payload event.
-        t:add(pf.class, "Motor stopped")
-        t:add(pf.summary, "PMtx global: motor stopped (0 MPH)")
-        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt §0C000005")
-        return "MotStop"
-    elseif cid == 0x0C000006 then
-        -- "PMtx global motor is decelerating" per janschu99 dictionary
-        -- §0C000006.
-        t:add(pf.class, "Motor decelerating")
-        t:add(pf.summary, "PMtx global: motor decelerating")
-        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt §0C000006")
-        return "MotDecel"
-    elseif bit.band(cid, 0xFFFF00FF) == 0x0C000000 and tvb:len() == 2 then
-        -- 0x0C00MM00 with 2-byte payload = ILM/lamp-controller (mask, bitmap)
-        -- per janschu99 dictionary line 40 (E=adn+1 case 0x0C000E00, but the
-        -- same 2-byte format is seen for 0x0C000400 = D=adn=4 ILM, and
-        -- 0x0C000500 = secondary controller).
-        local adn = bit.band(bit.rshift(cid, 8), 0xFF)
-        t:add(pf.slot, adn)
-        return decode_lights(tvb, t)
-    elseif bit.band(cid, 0xFFFFFF00) == 0x0C000400 then
-        -- 0x0C0004NN per-indicator action (DLC=0): 01=L turn, 02=R turn,
-        -- 03=hazard, 04=flood. Per dictionary lines 36-39.
-        local action = bit.band(cid, 0xFF)
-        local action_name = ({[0x01]="start L turn signal",
-                              [0x02]="start R turn signal",
-                              [0x03]="start hazard lamps",
-                              [0x04]="start flood lamps"})[action]
-                           or string.format("action 0x%02X", action)
-        t:add(pf.class, "Lamp action")
-        t:add(pf.summary, "JSMtx → ILM: " .. action_name)
-        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt §0C0004NN")
-        return "Lamp"
-    elseif bit.band(cid, 0xFFFF00F0) == 0x0C000000 and bit.band(cid, 0xF) >= 1
-           and bit.band(cid, 0xF) <= 6 and bit.band(bit.rshift(cid, 8), 0xFF) >= 0x01 then
-        -- 0x0C00MM0{1,2,3,4,5,6} for MM != 0x00 and MM != 0x04 = JSM UI
-        -- interaction events for module MM. Per dictionary lines 32-35.
-        -- (0x0C0004XX is handled above; 0x0C000005/06 are motor state.)
-        local mm = bit.band(bit.rshift(cid, 8), 0xFF)
-        local sub = bit.band(cid, 0xF)
-        t:add(pf.class, string.format("JSM UI event (module %d, sub %d) [unverified]", mm, sub))
-        t:add(pf.summary, string.format(
-            "JSMtx UI interaction for module %d (sub 0x%02X)", mm, sub))
-        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt §0C000205/0C000301")
-        return "UIEvent"
-    elseif bit.band(cid, 0xFFFF0000) == 0x0C000000 then
-        return decode_lights(tvb, t)
-    elseif bit.band(cid, 0xFFFFF0FF) == 0x1C300004 then
-        return decode_distance(tvb, t, cid)
-    elseif bit.band(cid, 0xFFFFF0F0) == 0x1C240000 then
-        local slot = bit.band(bit.rshift(cid, 8), 0xF)
-        local state = (bit.band(cid, 0xF) == 0x01) and "ready" or "power down"
-        t:add(pf.class, "Device state")
-        t:add(pf.slot, slot)
-        t:add(pf.summary, string.format("Device slot=%X %s", slot, state))
-        add_evidence(t, "Code", "rnet_utils.py:424")
-        return "DevState"
-    elseif bit.band(cid, 0xFFFFF0F0) == 0x0C180000 then
-        return decode_motor_enable(tvb, t, cid)
-    elseif bit.band(cid, 0xFFFFF0F0) == 0x140C0000 then
-        -- Payload empirically DLC=2: bytes 0-1 are a BE u16 error code.
-        -- Cross-referenced against open-rnet/docs/RNET_ERROR_CODES.md
-        -- (302 entries from "PGDT R-net Error Code List with Remedies v1").
-        local slot = bit.band(bit.rshift(cid, 8), 0xF)
-        t:add(pf.class, "Status / error")
-        t:add(pf.slot, slot)
-        if tvb:len() >= 2 then
-            local code = tvb(0,1):uint() * 256 + tvb(1,1):uint()
-            t:add(pf.err_code, code):set_generated()
-            t:add(pf.err_state, code ~= 0):set_generated()
-            local name = error_codes[code]
-            if name then
-                t:add(pf.err_name, name):set_generated()
-                t:add(pf.summary, string.format(
-                    "⚠ FAULT slot=%X: %s (0x%04X)", slot, name, code))
-            elseif code == 0 then
-                t:add(pf.summary, string.format("Status slot=%X (no fault)", slot))
-            else
-                t:add(pf.summary, string.format(
-                    "⚠ Status slot=%X code=0x%04X (undocumented)", slot, code))
-            end
-        end
-        add_evidence(t, "Code", "rnet_utils.py:437 + docs/RNET_ERROR_CODES.md (302 entries)")
-        return "Status"
-    elseif cid == 0x0C280000 then
-        -- "PM connected" sentinel — sent once by PM after the serial-number
-        -- exchange completes. Per janschu99 RNETdictionary.txt §0C280000.
-        t:add(pf.class, "PM connected")
-        if tvb:len() >= 1 then
-            t:add(pf.summary, string.format("PM connected (flag=0x%02X)", tvb(0,1):uint()))
-        else
-            t:add(pf.summary, "PM connected (DLC=0)")
-        end
-        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt §0C280000")
-        return "PMconn"
-    elseif bit.band(cid, 0xFFFFF0FF) == 0x0C280000 then
-        -- 0x0C280X00 per-slot variants — by analogy to slot-0 "PM connected"
-        -- sentinel, likely module-connected sentinels for slots 1+.
-        local slot = bit.band(bit.rshift(cid, 8), 0xF)
-        t:add(pf.class, string.format("Module connected (slot %X) [unverified]", slot))
-        t:add(pf.slot, slot)
-        if tvb:len() >= 1 then
-            t:add(pf.summary, string.format(
-                "Slot %X connected (flag=0x%02X) [unverified]", slot, tvb(0,1):uint()))
-        end
-        add_evidence(t, "Inferred", "family-analogy to documented 0x0C280000 PM-connected")
-        return "ModConn"
-    elseif bit.band(cid, 0xFFFFF000) == 0x0A400000 then
-        -- BTM (Bluetooth Mouse) family extension. The documented entries
-        -- (0x0A400002/0102 Status 1/2, 0x0A400300/01 Control 1/2) are
-        -- specific cases of this prefix. Variants like 0x0A4002X1 and
-        -- 0x0A400401 appear in captures but aren't documented; treat as
-        -- BTM-family with the function/sub bytes surfaced.
-        local sub = bit.band(cid, 0xFFFF)
-        t:add(pf.class, string.format("BTM family (sub 0x%04X) [unverified]", sub))
-        t:add(pf.summary, string.format("BTM family sub=0x%04X", sub))
-        add_evidence(t, "Inferred", "family-analogy to documented BTM Control/Status")
-        return "BTMx"
-    elseif bit.band(cid, 0xFFFFF0FF) == 0x1C200000 then
-        -- Per janschu99 categorized dictionary line 52:
-        --   "1C200X00#RrSsTtUuVv :JSMrx X=device (don't care). 0x0481000003
-        --    triggers jsm error display... but JoyXY continues"
-        -- So this is a JSM-rx event frame; specific payload 0x0481000003
-        -- triggers an error display (without halting joystick).
-        local slot = bit.band(bit.rshift(cid, 8), 0xF)
-        t:add(pf.class, "JSM-rx event (0x1C20 family)")
-        t:add(pf.slot, slot)
-        if tvb:len() >= 5 then
-            local hex = bytes_to_hex(tvb, 0, 5)
-            if hex == "0481000003" then
-                t:add(pf.summary, "JSM-rx 0x1C20: TRIGGER jsm error display (0481000003)")
-            else
-                t:add(pf.summary, string.format("JSM-rx 0x1C20 slot=%X payload=%s", slot, hex))
-            end
-        end
-        add_evidence(t, "Documented", "janschu99 categorized dictionary line 52 §1C200X00")
-        return "JsmRx1C20"
-    elseif bit.band(cid, 0xFFFFF0FF) == 0x14300001 then
-        -- DLC=1, byte 0 observed at {0, 25, 50, 100} — quartile percentages.
-        -- Hypothesis from external RE notes R3 Q4a: motor-family percentage
-        -- scale, possibly torque-limit or speed-cap. Single-byte. Slot in low
-        -- nibble of bits 11-8 (matching the 0x14300X00 motor-power pattern).
-        local slot = bit.band(bit.rshift(cid, 8), 0xF)
-        t:add(pf.class, "Motor scale [unverified]")
-        t:add(pf.slot, slot)
-        if tvb:len() >= 1 then
-            local v = tvb(0,1):uint()
-            t:add(pf.summary, string.format(
-                "Motor scale slot=%X = %d%% [unverified]", slot, v))
-        end
-        add_evidence(t, "Inferred", "hackathon-only observation")
-        return "MotScl"
-    elseif cid == 0x15000000 then
-        -- 5 occurrences total in hackathon dump, DLC=4, constant payload
-        -- 01 00 01 00. Truly undocumented namespace per external RE notes R3
-        -- reply. Likely event/announcement broadcast; precise semantics open.
-        t:add(pf.class, "Event broadcast (0x15) [unverified]")
-        t:add(pf.summary, "Event broadcast — semantics unknown")
-        add_evidence(t, "Inferred", "hackathon-only observation, no corpus citation")
-        return "Event"
-    elseif bit.band(cid, 0xFFF00000) == 0x1E800000 then
-        -- 0x1E8X = Programmer protocol-control sentinel namespace.
-        -- Outside POP-ext: `(0x1E8X >> 18) & 0x7E0 = 0x7A0 ≠ 0x780`.
-        --
-        -- Structural hypothesis from POP 0x1E8X sentinel namespace notes
-        -- (NOT yet Ghidra-confirmed):
-        --   subtype = bits 18-16 (top nibble after the 0x8):
-        --     0 → Transfer Complete; low nibble of tail = target slot
-        --         (0x1E80000F = slot 15 = Programmer)
-        --     4-5 → Transfer state advance (start? checkpoint?)
-        --     6-7 → Transfer-with-payload-in-ID; low 16 bits =
-        --           opaque value (CRC echo? hash? transfer ID?)
-        local subtype = bit.band(bit.rshift(cid, 16), 0xF)
-        local tail = bit.band(cid, 0xFFFF)
-        local label, summary
-        if subtype == 0 then
-            -- 0x1E80NNNN — Transfer Complete variants
-            label = "Transfer Complete sentinel"
-            if tail == 0x000F then
-                summary = "Transfer Complete → Programmer (slot 15)"
-            else
-                summary = string.format("Transfer Complete (tail=0x%04X) [unverified payload]", tail)
-            end
-        elseif subtype == 4 or subtype == 5 then
-            label = string.format("Transfer state advance (N=%d) [unverified]", subtype)
-            summary = string.format("Sentinel N=%d tail=0x%04X — start/checkpoint hypothesis", subtype, tail)
-        elseif subtype == 6 or subtype == 7 then
-            label = string.format("Transfer-with-payload-in-ID (N=%d) [unverified]", subtype)
-            summary = string.format(
-                "Sentinel N=%d tail=0x%04X — CRC echo / hash / transfer-ID hypothesis",
-                subtype, tail)
-        else
-            label = string.format("0x1E8X sentinel (N=%d) [unverified]", subtype)
-            summary = string.format("Sentinel N=%d tail=0x%04X (subtype semantics TBD)", subtype, tail)
-        end
-        t:add(pf.class, label)
-        t:add(pf.summary, summary)
-        add_evidence(t, "Inferred", "POP 0x1E8X sentinel namespace structural hypothesis")
-        return "Sentinel"
-    else
-        t:add(pf.class, string.format("Unknown XTD 0x%08X", cid))
-        return nil
-    end
-end
-
--- Main dissector -------------------------------------------------------------
-
-function rnet.dissector(tvb, pinfo, tree)
-    -- Pull CAN metadata from the SocketCAN dissector below us.
-    local fi_id  = f_id()
-    if fi_id == nil then return 0 end          -- not a CAN frame
-    local cid    = fi_id.value
-    local fi_xtd = f_xtd();  local is_xtd = fi_xtd and fi_xtd.value or false
-    local fi_rtr = f_rtr();  local is_rtr = fi_rtr and fi_rtr.value or false
-
-    local t = tree:add(rnet, tvb(), string.format(
-        "R-Net  ID=0x%0" .. (is_xtd and "8" or "3") .. "X  %s%s  len=%d",
-        cid, is_xtd and "XTD" or "STD", is_rtr and " RTR" or "", tvb:len()))
-
-    local tag
-    if is_xtd then
-        tag = decode_xtd(tvb, t, cid, is_rtr)
-    else
-        tag = decode_std(tvb, t, cid, is_rtr)
-    end
-
-    pinfo.cols.protocol = "R-Net"
-    -- Echo the decoded summary into the Info column so users see semantics
-    -- in the packet list. Fallback to a terse tag+ID when no summary was
-    -- generated (e.g. unknown frame classes).
-    local sf = f_summary()
-    if sf and sf.value and sf.value ~= "" then
-        pinfo.cols.info = sf.value
-    elseif tag then
-        pinfo.cols.info = string.format("[%s] ID=0x%X", tag, cid)
-    else
-        pinfo.cols.info = string.format("Unknown ID=0x%X len=%d", cid, tvb:len())
-    end
-    return tvb:len()
-end
 
 -- Heuristic registration on the SocketCAN dissector --------------------------
 -- Any SocketCAN-encapsulated frame's payload reaches us via this hook. We
