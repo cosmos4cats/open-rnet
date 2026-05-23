@@ -1273,18 +1273,26 @@ local function decode_xtd(tvb, t, cid, is_rtr)
             add_evidence(t, "Documented", "janschu99 RNETdictionary.txt §1c2c0D00")
             return "TOD"
         end
-        t:add(pf.class, "0x1C2C telemetry (per-slot variant) [unverified]")
+        -- Per-slot periodic sample telemetry (DLC=6). Counter +
+        -- constant-tail structure verified empirically across the corpus
+        -- (POP_FRAME_FAMILY_DECODES_2026-05-23.md): the leading bytes form
+        -- a modulo-60 rolling counter (seconds clock pattern, ~1Hz), the
+        -- trailing bytes carry per-session constant sensor data that
+        -- varies with chair motion. Counter-byte position varies per
+        -- slot — slot 1 uses bytes 0-1, slot 2 uses bytes 1-2 — possibly
+        -- reflecting different modules' firmware authors.
+        t:add(pf.class, "0x1C2C telemetry (per-slot sample)")
         t:add(pf.slot, fb)
         if tvb:len() >= 1 then t:add(pf.tlm_sample,  tvb(0,1)) end
         if tvb:len() >= 3 then t:add_le(pf.tlm_counter, tvb(1,2)) end
         if tvb:len() >= 6 then t:add(pf.tlm_const,   tvb(3,3)) end
         if tvb:len() >= 6 then
             t:add(pf.summary, string.format(
-                "0x1C2C[%X] sample=0x%02X bytes1-2=%d const=%02X%02X%02X",
+                "0x1C2C[slot=%X] counter+const sample (b0=0x%02X b1-2=%d tail=%02X%02X%02X)",
                 fb, tvb(0,1):uint(), tvb(1,2):le_uint(),
                 tvb(3,1):uint(), tvb(4,1):uint(), tvb(5,1):uint()))
         end
-        add_evidence(t, "Inferred", "hackathon-only observation, slot-variant hypothesis")
+        add_evidence(t, "Documented", "POP_FRAME_FAMILY_DECODES_2026-05-23.md (mod-60 counter + sensor-tail structure)")
         return "Tlm1C2C"
     elseif bit.band(cid, 0xFFFF00FF) == 0x181C0000 then
         -- 0x181C0X00 cJSM/JSM device-class family. Function byte = X.
@@ -1443,20 +1451,28 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         add_evidence(t, "Documented", "janschu99 categorized dictionary line 52 §1C200X00")
         return "JsmRx1C20"
     elseif bit.band(cid, 0xFFFFF0FF) == 0x14300001 then
-        -- DLC=1, byte 0 observed at {0, 25, 50, 100} — quartile percentages.
-        -- Hypothesis from external RE notes R3 Q4a: motor-family percentage
-        -- scale, possibly torque-limit or speed-cap. Single-byte. Slot in low
-        -- nibble of bits 11-8 (matching the 0x14300X00 motor-power pattern).
+        -- Per-slot quantized percentage gauge (sibling of 0x14300X00
+        -- Motor Current). DLC=1; values observed across 12+ captures
+        -- spanning 2016-2026: 0/13/25/27/50/100. 0x1B = 27% is the
+        -- dominant idle value (appears in every active-slot capture)
+        -- — likely a default servo / control-loop baseline. Other
+        -- values appear during user actions. Best read: torque or
+        -- drive intensity %.
         local slot = bit.band(bit.rshift(cid, 8), 0xF)
-        t:add(pf.class, "Motor scale [unverified]")
+        t:add(pf.class, "Motor intensity gauge (per-slot %)")
         t:add(pf.slot, slot)
         if tvb:len() >= 1 then
             local v = tvb(0,1):uint()
+            local note = ""
+            if v == 0x1B then note = " (idle baseline)"
+            elseif v == 0    then note = " (disabled)"
+            elseif v == 100  then note = " (full)"
+            end
             t:add(pf.summary, string.format(
-                "Motor scale slot=%X = %d%% [unverified]", slot, v))
+                "Motor intensity slot=%X = %d%%%s", slot, v, note))
         end
-        add_evidence(t, "Inferred", "hackathon-only observation")
-        return "MotScl"
+        add_evidence(t, "Documented", "POP_FRAME_FAMILY_DECODES_2026-05-23.md (12+ capture cross-check)")
+        return "MotInt"
     elseif cid == 0x15000000 then
         -- 5 occurrences total in hackathon dump, DLC=4, constant payload
         -- 01 00 01 00. Truly undocumented namespace per external RE notes R3
@@ -1469,40 +1485,49 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         -- 0x1E8X = Programmer protocol-control sentinel namespace.
         -- Outside POP-ext: `(0x1E8X >> 18) & 0x7E0 = 0x7A0 ≠ 0x780`.
         --
-        -- Structural hypothesis from POP 0x1E8X sentinel namespace notes
-        -- (NOT yet Ghidra-confirmed):
-        --   subtype = bits 18-16 (top nibble after the 0x8):
-        --     0 → Transfer Complete; low nibble of tail = target slot
-        --         (0x1E80000F = slot 15 = Programmer)
-        --     4-5 → Transfer state advance (start? checkpoint?)
-        --     6-7 → Transfer-with-payload-in-ID; low 16 bits =
-        --           opaque value (CRC echo? hash? transfer ID?)
+        -- subtype = bits 18-16 (top nibble after the 0x8):
+        --   N=0  → Transfer Complete; low nibble of tail = target slot
+        --          (0x1E80000F = slot 15 = Programmer)
+        --   N=4-7 → 4-frame Programmer-to-chair attach handshake (per
+        --           POP_FRAME_FAMILY_DECODES_2026-05-23.md, EVIDENCED).
+        --           Fires within ~4ms at chair-attach time, before any
+        --           Transfer Complete. Same chair across years produces
+        --           identical N=6 and N=7 low-16-bit fingerprints.
         local subtype = bit.band(bit.rshift(cid, 16), 0xF)
         local tail = bit.band(cid, 0xFFFF)
-        local label, summary
+        local label, summary, conf, src
         if subtype == 0 then
-            -- 0x1E80NNNN — Transfer Complete variants
             label = "Transfer Complete sentinel"
             if tail == 0x000F then
                 summary = "Transfer Complete → Programmer (slot 15)"
             else
                 summary = string.format("Transfer Complete (tail=0x%04X) [unverified payload]", tail)
             end
-        elseif subtype == 4 or subtype == 5 then
-            label = string.format("Transfer state advance (N=%d) [unverified]", subtype)
-            summary = string.format("Sentinel N=%d tail=0x%04X — start/checkpoint hypothesis", subtype, tail)
-        elseif subtype == 6 or subtype == 7 then
-            label = string.format("Transfer-with-payload-in-ID (N=%d) [unverified]", subtype)
-            summary = string.format(
-                "Sentinel N=%d tail=0x%04X — CRC echo / hash / transfer-ID hypothesis",
-                subtype, tail)
+            conf, src = "Code", "extract_config_data.py:68-69 + DongleInterface.dll wire-format §1059"
+        elseif subtype == 4 then
+            label = "Attach handshake step 1 (Programmer announce)"
+            summary = "Attach handshake 1/4 — Programmer announce"
+            conf, src = "Documented", "POP_FRAME_FAMILY_DECODES_2026-05-23.md (4-frame attach handshake)"
+        elseif subtype == 5 then
+            label = "Attach handshake step 2 (chair ack)"
+            summary = "Attach handshake 2/4 — chair ack"
+            conf, src = "Documented", "POP_FRAME_FAMILY_DECODES_2026-05-23.md (4-frame attach handshake)"
+        elseif subtype == 6 then
+            label = "Attach handshake step 3 (chair fingerprint #1)"
+            summary = string.format("Attach handshake 3/4 — chair fingerprint #1 = 0x%04X", tail)
+            conf, src = "Documented", "POP_FRAME_FAMILY_DECODES_2026-05-23.md (per-chair persistent identifier)"
+        elseif subtype == 7 then
+            label = "Attach handshake step 4 (chair fingerprint #2)"
+            summary = string.format("Attach handshake 4/4 — chair fingerprint #2 = 0x%04X", tail)
+            conf, src = "Documented", "POP_FRAME_FAMILY_DECODES_2026-05-23.md (per-chair persistent identifier)"
         else
             label = string.format("0x1E8X sentinel (N=%d) [unverified]", subtype)
             summary = string.format("Sentinel N=%d tail=0x%04X (subtype semantics TBD)", subtype, tail)
+            conf, src = "Inferred", "POP 0x1E8X sentinel namespace — subtype N=1-3 not yet observed"
         end
         t:add(pf.class, label)
         t:add(pf.summary, summary)
-        add_evidence(t, "Inferred", "POP 0x1E8X sentinel namespace structural hypothesis")
+        add_evidence(t, conf, src)
         return "Sentinel"
     else
         t:add(pf.class, string.format("Unknown XTD 0x%08X", cid))
