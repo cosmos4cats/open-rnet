@@ -109,6 +109,11 @@ local pf = {
     pop_binds_pid  = ProtoField.uint32("rnet.pop.binds_param_id", "Parameter ID this DATA frame writes/reads (from prior POINTER)", base.DEC),
     pop_binds_name = ProtoField.string("rnet.pop.binds_param_name","Parameter name this DATA frame writes/reads (from prior POINTER)"),
     pop_binds_src  = ProtoField.framenum("rnet.pop.binds_pointer_frame", "Frame number of the POINTER setup that bound this DATA"),
+    -- Plan 1: R-Net session-state annotation. Every frame in the conversation
+    -- carries the current session state (CXTN_NONE/CAN/RNET/UPLOAD/DOWNLOAD).
+    -- POP frames participating in a transfer also get a transfer-id counter.
+    session_state = ProtoField.string("rnet.session_state", "R-Net session state (per CXTN_STATUS enum, mirrors rnet_state_timeline.py)"),
+    transfer_id   = ProtoField.uint32("rnet.transfer_id",  "Transfer episode counter (POP transfers, increments on each UPLOAD/DOWNLOAD open)"),
     pop_addr_name   = ProtoField.string("rnet.pop.addr_name",   "Parameter name (.rnd, firmware-specific guess — see prefix for stable taxonomy)"),
     pop_addr_prefix = ProtoField.string("rnet.pop.addr_prefix", "Parameter module prefix (.rnd, stable across firmware versions)"),
     pop_addr_path   = ProtoField.string("rnet.pop.addr_path",   "Parameter GUI path (.rnd, dealer-menu location)"),
@@ -328,6 +333,124 @@ end
 local function invalidate_pointer(pinfo, this_node, other_node)
     if not pinfo or pinfo.visited then return end
     _active_pointer[_pair_key(this_node, other_node)] = nil
+end
+
+-- Plan 1: R-Net session-state annotation ------------------------------------
+-- Mirrors the transition rules in rnet_state_timeline.py exactly, so the
+-- dissector's per-frame state matches what the standalone tool would
+-- produce. State machine (CXTN_NONE → CAN → RNET → UPLOAD/DOWNLOAD)
+-- driven by 4 wire events:
+--   1. First observed frame                                  → CXTN_CAN
+--   2. First 0x7B3 OR completed 4-frame 1E84/85/86/87 handshake → CXTN_RNET
+--   3. POP std TC=0 (segment 0) on 0x78F / 0x791             → CXTN_DOWNLOAD/UPLOAD
+--   4. 0x1E80000F Transfer Complete sentinel                 → CXTN_RNET
+-- Plus a gap heuristic: >5s quiet falls back to CXTN_NONE.
+local _session_state       = "CXTN_NONE"
+local _handshake_progress  = 0
+local _open_transfers      = 0
+local _transfer_counter    = 0
+local _active_transfer_id  = nil  -- current open transfer's id
+local _last_frame_time     = nil
+-- Per-frame cached state for re-pass safety
+local _frame_session_state = {}   -- [frame_no] = {state, transfer_id_or_nil}
+
+local function _reset_session_state()
+    _session_state = "CXTN_NONE"
+    _handshake_progress = 0
+    _open_transfers = 0
+    _transfer_counter = 0
+    _active_transfer_id = nil
+    _last_frame_time = nil
+    _frame_session_state = {}
+end
+
+local function _maybe_reset_state_full(pinfo)
+    -- One-shot reset hook called from rnet.dissector for both Plan 2's
+    -- binding state and Plan 1's session state.
+    if pinfo and not pinfo.visited and pinfo.number == 1 then
+        _active_pointer = {}
+        _frame_binding = {}
+        _reset_session_state()
+    end
+end
+
+-- Returns (state_string, transfer_id_or_nil) for the given frame.
+-- On first pass: advances the state machine based on this frame's wire
+-- features and caches the result. On re-pass: returns the cached result.
+local function session_state_for_frame(pinfo, cid, is_xtd, byte0)
+    if not pinfo then return _session_state, nil end
+    local fno = pinfo.number
+    if pinfo.visited then
+        local c = _frame_session_state[fno]
+        if c then return c.state, c.transfer_id end
+        return _session_state, _active_transfer_id
+    end
+
+    -- Gap detection — long quiet period falls back to NONE.
+    if pinfo.rel_ts and _last_frame_time and
+       (pinfo.rel_ts - _last_frame_time) > 5.0 and
+       _session_state ~= "CXTN_NONE" then
+        _session_state = "CXTN_NONE"
+        _handshake_progress = 0
+        _open_transfers = 0
+        _active_transfer_id = nil
+    end
+    if pinfo.rel_ts then _last_frame_time = pinfo.rel_ts end
+
+    -- First observed frame → CXTN_CAN
+    if _session_state == "CXTN_NONE" then
+        _session_state = "CXTN_CAN"
+    end
+
+    -- 4-frame handshake detection on extended IDs 0x1E84/85/86/87
+    if is_xtd and cid >= 0x1E840000 and cid <= 0x1E87FFFF then
+        local sub = bit.band(bit.rshift(cid, 16), 0xF)
+        if     sub == 4 and _handshake_progress == 0 then _handshake_progress = 1
+        elseif sub == 5 and _handshake_progress == 1 then _handshake_progress = 2
+        elseif sub == 6 and _handshake_progress == 2 then _handshake_progress = 3
+        elseif sub == 7 and _handshake_progress == 3 then
+            _handshake_progress = 4
+            if _session_state == "CXTN_CAN" then _session_state = "CXTN_RNET" end
+        end
+    end
+
+    -- Alternative path to CXTN_RNET: first 0x7B3 serial-exchange
+    if not is_xtd and cid == 0x7B3 and _session_state == "CXTN_CAN"
+       and _handshake_progress < 4 then
+        _session_state = "CXTN_RNET"
+    end
+
+    -- POP std TC=0 → start of transfer
+    if _session_state == "CXTN_RNET" and not is_xtd
+       and cid >= 0x780 and cid <= 0x79F and byte0 then
+        local tc = bit.band(bit.rshift(byte0, 6), 0x3)
+        if tc == 0 then
+            _open_transfers = _open_transfers + 1
+            if _open_transfers == 1 then
+                _transfer_counter = _transfer_counter + 1
+                _active_transfer_id = _transfer_counter
+                -- Heuristic: 0x78F = JSM→PM = DOWNLOAD, 0x791 = PM→JSM = UPLOAD
+                if cid == 0x78F then
+                    _session_state = "CXTN_DOWNLOAD"
+                else
+                    _session_state = "CXTN_UPLOAD"
+                end
+            end
+        end
+    end
+
+    -- Transfer Complete sentinel → back to CXTN_RNET
+    if cid == 0x1E80000F and
+       (_session_state == "CXTN_UPLOAD" or _session_state == "CXTN_DOWNLOAD") then
+        _session_state = "CXTN_RNET"
+        _open_transfers = 0
+        _active_transfer_id = nil
+    end
+
+    _frame_session_state[fno] = {
+        state = _session_state, transfer_id = _active_transfer_id,
+    }
+    return _session_state, _active_transfer_id
 end
 
 -- Returns {pid, name, frame_no} (the POINTER's frame) or nil
@@ -1730,7 +1853,7 @@ end
 function rnet.dissector(tvb, pinfo, tree)
     -- Reset per-file dissector state on a new file (frame 1, unvisited).
     -- Safe no-op on the common in-file re-dissection case.
-    _maybe_reset_binding_state(pinfo)
+    _maybe_reset_state_full(pinfo)
     -- Pull CAN metadata from the SocketCAN dissector below us.
     local fi_id  = f_id()
     if fi_id == nil then return 0 end          -- not a CAN frame
@@ -1741,6 +1864,14 @@ function rnet.dissector(tvb, pinfo, tree)
     local t = tree:add(rnet, tvb(), string.format(
         "R-Net  ID=0x%0" .. (is_xtd and "8" or "3") .. "X  %s%s  len=%d",
         cid, is_xtd and "XTD" or "STD", is_rtr and " RTR" or "", tvb:len()))
+
+    -- Plan 1: advance the R-Net session-state machine for this frame
+    -- and emit the resulting state. Done before per-frame decoding so
+    -- the state field is consistently first in the detail tree.
+    local b0 = (tvb:len() >= 1 and not is_rtr) and tvb(0,1):uint() or nil
+    local sstate, tid = session_state_for_frame(pinfo, cid, is_xtd, b0)
+    t:add(pf.session_state, sstate):set_generated()
+    if tid then t:add(pf.transfer_id, tid):set_generated() end
 
     local tag
     if is_xtd then

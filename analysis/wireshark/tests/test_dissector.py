@@ -839,6 +839,37 @@ def test_rnet_dump_wrapper_produces_expected_format():
     )
 
 
+def test_session_state_machine_matches_known_transitions():
+    """Plan 1: the per-frame R-Net session-state annotation must match
+    the rnet-firmware rnet_state_timeline.py tool's transition log
+    (different implementation, same algorithm). Anchored on
+    programmer_write_file_july2017 whose timeline is fully documented:
+
+      frame 1   → CXTN_CAN       (first observed frame)
+      frame 3   → CXTN_RNET      (first 0x7B3 serial exchange)
+      frame 55  → CXTN_UPLOAD    (first POP TC=0 open)
+      frame 372 → CXTN_RNET      (first Transfer Complete sentinel)
+
+    Also asserts the transfer-id counter increments on each new POP
+    open (1 at frame 55, 2 at frame 388)."""
+    if not have_capture("programmer_write"):
+        pytest.skip("programmer_write capture not present")
+    rows = fields("programmer_write",
+                  'frame.number in {1,3,55,372,388}',
+                  ["frame.number", "rnet.session_state", "rnet.transfer_id"])
+    by_num = {r[0]: (r[1], r[2]) for r in rows}
+    assert by_num.get("1") == ("CXTN_CAN", ""), \
+        f"frame 1 should be CXTN_CAN; got {by_num.get('1')!r}"
+    assert by_num.get("3") == ("CXTN_RNET", ""), \
+        f"frame 3 should be CXTN_RNET; got {by_num.get('3')!r}"
+    assert by_num.get("55") == ("CXTN_UPLOAD", "1"), \
+        f"frame 55 should be CXTN_UPLOAD, transfer=1; got {by_num.get('55')!r}"
+    assert by_num.get("372") == ("CXTN_RNET", ""), \
+        f"frame 372 should be CXTN_RNET (post-complete); got {by_num.get('372')!r}"
+    assert by_num.get("388") == ("CXTN_UPLOAD", "2"), \
+        f"frame 388 should be CXTN_UPLOAD, transfer=2; got {by_num.get('388')!r}"
+
+
 def test_pointer_data_binding_carries_parameter_name():
     """Plan 2: when a POP POINTER setup names a parameter and a DATA
     frame follows from the same node-pair within a short window, the
