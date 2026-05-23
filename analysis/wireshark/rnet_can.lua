@@ -3888,15 +3888,18 @@ local function decode_serial_heartbeat(tvb, t)
     if tvb:len() >= 4 then
         t:add(pf.serial_bytes, tvb(0, math.min(8, tvb:len())))
         local sn = bytes_to_hex(tvb, 0, math.min(4, tvb:len()))
-        -- Identify the network if the serial matches a known one
-        local net_tag = ""
-        if     sn == "08901C8A" then net_tag = " [Table A: Standalone JSM]"
-        elseif sn == "50C01C8F" then net_tag = " [Table B: M300]"
-        elseif sn == "B68021AE" then net_tag = " [Table D: Hackathon]"
+        -- At power-on the JSM emits all-zero serial-heartbeat frames
+        -- before it has loaded its own serial from EEPROM. The real
+        -- serial appears in the subsequent auth-response handshake.
+        -- Label this state explicitly so readers don't think the
+        -- dissector dropped bytes.
+        if sn == "00000000" then
+            t:add(pf.summary, "JSM serial heartbeat (pre-init — serial not yet loaded)")
+        else
+            t:add(pf.summary, string.format("JSM serial=%s", sn))
         end
-        t:add(pf.summary, string.format("JSM serial=%s%s", sn, net_tag))
     end
-    add_evidence(t, "Code", "rnet_utils.py:275 + XOR-table identification")
+    add_evidence(t, "Code", "rnet_utils.py:275")
     return "SerHB"
 end
 
