@@ -1,0 +1,160 @@
+"""Tiny pcap writer for hand-crafted SocketCAN frames.
+
+Generates a single pcap file per call with the requested set of CAN
+frames. Used by test_edge_cases.py to exercise the dissector against
+edge cases the real-capture corpus doesn't reach.
+
+No dependencies — bundles a small writer for the LINKTYPE_CAN_SOCKETCAN
+(linktype 227) pcap format. Compatible with Wireshark/tshark.
+
+Format references:
+- pcap classic: https://www.tcpdump.org/manpages/pcap-savefile.5.txt
+- LINKTYPE_CAN_SOCKETCAN: tcpdump.org/linktypes/LINKTYPE_CAN_SOCKETCAN.html
+"""
+
+import struct
+from pathlib import Path
+
+PCAP_MAGIC      = 0xA1B2C3D4
+PCAP_VERS_MAJOR = 2
+PCAP_VERS_MINOR = 4
+LINKTYPE_CAN_SOCKETCAN = 227
+
+# Per-frame SocketCAN flags packed into the top bits of the 32-bit CAN ID
+CAN_EFF_FLAG = 0x80000000  # extended ID
+CAN_RTR_FLAG = 0x40000000  # remote transmission request
+CAN_ERR_FLAG = 0x20000000
+
+
+def _pcap_global_header():
+    return struct.pack(
+        "<IHHiIII",
+        PCAP_MAGIC, PCAP_VERS_MAJOR, PCAP_VERS_MINOR,
+        0,        # thiszone
+        0,        # sigfigs
+        65535,    # snaplen
+        LINKTYPE_CAN_SOCKETCAN,
+    )
+
+
+def _socketcan_frame(can_id: int, data: bytes, *, extended=False, rtr=False):
+    if extended:
+        can_id |= CAN_EFF_FLAG
+    if rtr:
+        can_id |= CAN_RTR_FLAG
+    # SocketCAN pseudo-header is the CAN ID (BE 32-bit), DLC, 3 padding bytes
+    # NOTE: Wireshark expects CAN ID in NETWORK byte order (big-endian).
+    hdr = struct.pack(">I", can_id) + struct.pack(">B3x", len(data))
+    payload = hdr + data
+    # SocketCAN frame is always 16 bytes wire; pad if needed
+    if len(payload) < 16:
+        payload += b"\x00" * (16 - len(payload))
+    return payload
+
+
+def _pcap_record(ts_sec: int, ts_usec: int, frame_bytes: bytes):
+    return struct.pack(
+        "<IIII",
+        ts_sec, ts_usec, len(frame_bytes), len(frame_bytes),
+    ) + frame_bytes
+
+
+def write_pcap(path, frames):
+    """Write a pcap file at `path` containing the given frames.
+
+    frames: list of dicts:
+      {"id": int, "data": bytes, "extended": bool=False, "rtr": bool=False,
+       "ts_sec": int=0, "ts_usec": int=N}
+    """
+    out = _pcap_global_header()
+    for i, f in enumerate(frames):
+        sc = _socketcan_frame(
+            f["id"], f.get("data", b""),
+            extended=f.get("extended", False),
+            rtr=f.get("rtr", False),
+        )
+        out += _pcap_record(
+            f.get("ts_sec", 0),
+            f.get("ts_usec", i * 1000),  # 1 ms apart by default
+            sc,
+        )
+    Path(path).write_bytes(out)
+
+
+# --- Edge-case frame catalog ----------------------------------------------
+# Each entry: {label: list-of-frames}. Test code asserts the dissector
+# handles each without crashing AND produces a sensible class label.
+
+EDGE_CASES = {
+    # POP std frame with DLC=0 (truncated payload). Real captures have
+    # DLC=8 for POP — what does the dissector do with nothing?
+    "pop_std_empty": [
+        {"id": 0x780, "data": b""},
+    ],
+    # POP std frame with DLC=8 but byte 0 unknown (not in legacy opcode
+    # map). Tests that decode_pop_std doesn't choke on unfamiliar values.
+    "pop_std_unknown_b0": [
+        # b0 = 0x77 → TC=1 Quick=1 CRC=1 OtherNode=7 — unusual combination
+        {"id": 0x780, "data": bytes.fromhex("77 81 00 00 00 00 00 00")},
+    ],
+    # CAN ID just outside the POP-ext namespace (0x1E7FFFFF is inside,
+    # 0x1E800000 is outside per the (id>>18)&0x7E0 == 0x780 test).
+    "pop_ext_boundary": [
+        {"id": 0x1E7FFFFF, "data": bytes.fromhex("00 11 22 33 44 55 66 77"),
+         "extended": True},
+        # Just outside (sentinel namespace, handled elsewhere)
+        {"id": 0x1E800001, "data": b"", "extended": True},
+    ],
+    # Auth challenge frame (0x1F prefix). Real captures only show seq 0-7;
+    # synthesize one with seq = 0xF to test out-of-range handling.
+    "auth_seq_overflow": [
+        # CAN ID = 0x1FFF0000 → seq=F (overflow), slot=F, key=0x00, val=0x00
+        {"id": 0x1FFF0000, "data": b"", "extended": True, "rtr": True},
+    ],
+    # RTC frame with all-zero payload (chair power-on case).
+    "rtc_zero": [
+        {"id": 0x1C2C0100, "data": bytes(6), "extended": True},
+    ],
+    # Mode-config frame (0x1EC prefix) with type=0xFF.
+    "mode_config_unknown_type": [
+        {"id": 0x1EC00000,
+         # 8 bytes: pfx_0 pfx_1 BE-addr value... type 0xFF in last byte
+         "data": bytes.fromhex("00 00 02 80 00 40 02 FF"),
+         "extended": True},
+    ],
+    # POP COMPLETE with target nibble != F (Programmer).
+    "transfer_complete_non_programmer": [
+        {"id": 0x1E800001, "data": b"", "extended": True},
+    ],
+    # 0x1E8X sentinel with subtype N=1 (currently unobserved on wire).
+    "sentinel_subtype_1": [
+        {"id": 0x1E810000, "data": b"", "extended": True},
+    ],
+    "sentinel_subtype_2": [
+        {"id": 0x1E820000, "data": b"", "extended": True},
+    ],
+    "sentinel_subtype_3": [
+        {"id": 0x1E830000, "data": b"", "extended": True},
+    ],
+}
+
+
+def write_all(out_dir):
+    """Write one pcap per EDGE_CASES entry into out_dir; return mapping
+    {label: path}."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    result = {}
+    for label, frames in EDGE_CASES.items():
+        p = out_dir / f"{label}.pcap"
+        write_pcap(p, frames)
+        result[label] = p
+    return result
+
+
+if __name__ == "__main__":
+    import sys
+    out = sys.argv[1] if len(sys.argv) > 1 else "/tmp/rnet-edge-pcaps"
+    paths = write_all(out)
+    for label, p in paths.items():
+        print(f"{label:35s} {p}")
