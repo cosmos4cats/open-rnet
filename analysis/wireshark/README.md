@@ -667,10 +667,42 @@ The most useful display filters that aren't immediately obvious:
 
 # CRC echoes in COMPLETE responses
 -Y 'rnet.pop.crc_value'
+
+# All frames inside a specific POP transfer (per-frame session state)
+-Y 'rnet.transfer_id == 7'
+
+# All frames during a download or upload (R-Net session state)
+-Y 'rnet.session_state matches "UPLOAD|DOWNLOAD"'
+
+# DATA frames bound to a specific parameter (cross-frame POINTER binding)
+-Y 'rnet.pop.binds_param_name == "BackUp"'
+
+# Just the chair-attach handshake (4 frames at session start)
+-Y 'rnet.class contains "R-Net attach"'
 ```
 
-(All require the `rnet.show_evidence:TRUE` pref for the
-`rnet.confidence` filter; the others work always.)
+(`rnet.confidence` requires the `rnet.show_evidence:TRUE` preference;
+the others work always.)
+
+### Recommended Wireshark columns
+
+The dissector populates a rich set of fields. For at-a-glance reading
+of a capture, the most useful columns to add (Edit → Preferences →
+Columns → New, choose `Custom`, paste the field name):
+
+| Column title | Field                       | Why useful                            |
+|---|---|---|
+| Network      | `rnet.auth.network`         | Surfaces "Table A/B/D" when auth validates    |
+| Reg          | `rnet.pop.reg_name`         | POINTER / DATA / TEXT / PAGE0 at a glance     |
+| Param        | `rnet.pop.binds_param_name` | Parameter the DATA frame is writing/reading   |
+| State        | `rnet.session_state`        | CXTN_RNET / UPLOAD / DOWNLOAD                 |
+| Xfer         | `rnet.transfer_id`          | Which POP transfer episode this frame is in   |
+| Fault        | `rnet.err.name`             | Decoded fault name on status frames           |
+
+The default `Info` column already carries the per-frame summary so
+you don't need to add anything to get a usable view — these columns
+make scanning long captures faster by surfacing specific fields in
+dedicated slots.
 
 ## Known gaps
 
@@ -791,7 +823,9 @@ analysis/wireshark/
   README.md                — this file
   reassemble_transfers.py  — POP transfer reassembly companion
   pwc_params.json          — vendored Permobil PWC param_id → name snapshot
-  tests/test_dissector.py  — pytest suite (39 tests)
+  tests/test_dissector.py  — pytest suite (42 tests)
+  tests/test_edge_cases.py — synthetic edge-case test harness (11 tests)
+  tests/synthetic/         — pcap generator for edge-case fixtures
 
 ../../captures/
   2026_AT_hackathon.log    — hackathon candump (source for Table D)
