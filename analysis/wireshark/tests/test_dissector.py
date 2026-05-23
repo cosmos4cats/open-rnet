@@ -839,6 +839,45 @@ def test_rnet_dump_wrapper_produces_expected_format():
     )
 
 
+def test_pointer_data_binding_carries_parameter_name():
+    """Plan 2: when a POP POINTER setup names a parameter and a DATA
+    frame follows from the same node-pair within a short window, the
+    DATA frame's summary names the parameter being read/written.
+
+    Anchored on programmer_write frames 71 (POINTER ptr=6.1 BackUp)
+    and the immediately following DATA frames 75/76. Also verifies the
+    invalidation semantics: frame 77 sets an unnamed POINTER (ptr=2),
+    so frames 80/81 must NOT inherit the BackUp binding."""
+    if not have_capture("programmer_write"):
+        pytest.skip("programmer_write capture not present")
+    rows = fields("programmer_write",
+                  'frame.number in {75,76,80,81,84,85}',
+                  ["frame.number", "rnet.pop.binds_param_name"])
+    by_num = {r[0]: r[1] for r in rows}
+    # Frames 75-76 bind to BackUp (param 262, named via PWC lookup)
+    assert by_num.get("75") == "BackUp", (
+        f"frame 75 should bind to BackUp; got {by_num.get('75')!r}"
+    )
+    assert by_num.get("76") == "BackUp", (
+        f"frame 76 should bind to BackUp; got {by_num.get('76')!r}"
+    )
+    # Frames 80-81 must be unbound — frame 77 set an unnamed POINTER
+    assert by_num.get("80", "") == "", (
+        f"frame 80 should NOT bind (unnamed POINTER at 77 invalidated); "
+        f"got {by_num.get('80')!r}"
+    )
+    assert by_num.get("81", "") == "", (
+        f"frame 81 should NOT bind; got {by_num.get('81')!r}"
+    )
+    # Frame 82 sets BackToggle (named), so 84-85 bind there
+    assert by_num.get("84") == "BackToggle", (
+        f"frame 84 should bind to BackToggle; got {by_num.get('84')!r}"
+    )
+    assert by_num.get("85") == "BackToggle", (
+        f"frame 85 should bind to BackToggle; got {by_num.get('85')!r}"
+    )
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))

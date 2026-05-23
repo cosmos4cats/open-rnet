@@ -103,6 +103,12 @@ local pf = {
     pop_ptr_sub   = ProtoField.uint8 ("rnet.pop.pointer_sub", "Pointer sub-index (data[6])", base.HEX),
     pop_ptr_pid   = ProtoField.uint16("rnet.pop.pointer_param_id", "Permobil PWC param_id (sub<<8 | idx)", base.DEC),
     pop_ptr_name  = ProtoField.string("rnet.pop.param_name",  "Parameter name (registry cross-reference)"),
+    -- Plan 2: POINTER → DATA value binding. When a POP DATA frame follows a
+    -- POINTER setup from the same node-pair within a short window, the DATA
+    -- frame carries which parameter the value belongs to.
+    pop_binds_pid  = ProtoField.uint32("rnet.pop.binds_param_id", "Parameter ID this DATA frame writes/reads (from prior POINTER)", base.DEC),
+    pop_binds_name = ProtoField.string("rnet.pop.binds_param_name","Parameter name this DATA frame writes/reads (from prior POINTER)"),
+    pop_binds_src  = ProtoField.framenum("rnet.pop.binds_pointer_frame", "Frame number of the POINTER setup that bound this DATA"),
     pop_addr_name   = ProtoField.string("rnet.pop.addr_name",   "Parameter name (.rnd, firmware-specific guess — see prefix for stable taxonomy)"),
     pop_addr_prefix = ProtoField.string("rnet.pop.addr_prefix", "Parameter module prefix (.rnd, stable across firmware versions)"),
     pop_addr_path   = ProtoField.string("rnet.pop.addr_path",   "Parameter GUI path (.rnd, dealer-menu location)"),
@@ -274,6 +280,71 @@ local function add_evidence(t, conf, src)
         t:add(pf.confidence, conf):set_generated()
         t:add(pf.evidence, src):set_generated()
     end
+end
+
+-- Plan 2: POINTER → DATA value binding ---------------------------------------
+-- The POP application protocol uses POINTER-register frames to name a
+-- parameter, then DATA-register frames to read/write its value. The two
+-- frames are separate on the wire. This state tracker remembers the most
+-- recent POINTER per node-pair so DATA frames can be labeled with the
+-- parameter they're operating on (visible in the per-frame summary).
+--
+-- Two scopes of state:
+--   _active_pointer : ephemeral working map updated only on the first
+--                     dissection pass. Cleared on "new file" (frame 1 not
+--                     visited).
+--   _frame_binding  : permanent per-frame map of "this DATA frame binds
+--                     to this earlier POINTER". Populated on first pass,
+--                     read on re-pass so display-filter changes don't
+--                     produce inconsistent labels.
+local _active_pointer = {}
+local _frame_binding  = {}
+local _binding_window = 30   -- max frames between POINTER and bound DATA
+
+-- Direction-insensitive pair key: PM→JSM and JSM→PM share a key, because
+-- POP read-responses can flow either way from the original POINTER setup.
+local function _pair_key(a, b)
+    if a <= b then return a * 16 + b end
+    return b * 16 + a
+end
+
+local function _maybe_reset_binding_state(pinfo)
+    if pinfo and not pinfo.visited and pinfo.number == 1 then
+        _active_pointer = {}
+        _frame_binding = {}
+    end
+end
+
+local function track_pointer(pinfo, this_node, other_node, pid, name)
+    if not pinfo or pinfo.visited then return end
+    _active_pointer[_pair_key(this_node, other_node)] = {
+        pid = pid, name = name, frame_no = pinfo.number,
+    }
+end
+
+-- Invalidate the active binding for a pair (used when an unnamed POINTER
+-- setup happens — we don't know what parameter the new transaction is
+-- about, so subsequent DATA frames must NOT inherit the previous binding).
+local function invalidate_pointer(pinfo, this_node, other_node)
+    if not pinfo or pinfo.visited then return end
+    _active_pointer[_pair_key(this_node, other_node)] = nil
+end
+
+-- Returns {pid, name, frame_no} (the POINTER's frame) or nil
+local function lookup_pointer_binding(pinfo, this_node, other_node)
+    if not pinfo then return nil end
+    local fno = pinfo.number
+    if pinfo.visited then
+        return _frame_binding[fno]
+    end
+    local p = _active_pointer[_pair_key(this_node, other_node)]
+    if p == nil then return nil end
+    if (fno - p.frame_no) > _binding_window then
+        _active_pointer[_pair_key(this_node, other_node)] = nil
+        return nil
+    end
+    _frame_binding[fno] = p
+    return p
 end
 
 -- Known XOR tables for the auth-frame validator. Evidence:
@@ -664,7 +735,7 @@ end
 -- hold the 24-bit ODI; bytes 4-6 hold a 24-bit Size; byte 7 is the Block
 -- counter. Per docs/DONGLE_INTERFACE_DLL_TYPES.md "Standard (11-bit) CAN ID
 -- POP message" (CPOPMsg decompile).
-local function decode_pop_std(tvb, t, cid)
+local function decode_pop_std(tvb, t, cid, pinfo)
     local this_node = bit.band(cid, 0xF)
     local dir       = bit.band(bit.rshift(cid, 4), 1)
     t:add(pf.class, "POP (standard-ID)")
@@ -742,11 +813,43 @@ local function decode_pop_std(tvb, t, cid)
                         -- bindings.
                         local param_id = bit.bor(bit.lshift(p_sub, 8), p_idx)
                         t:add(pf.pop_ptr_pid, param_id):set_generated()
+                        local resolved_name
                         if p_sub >= 1 then
-                            local name = pwc_params[param_id]
-                            if name then
-                                t:add(pf.pop_ptr_name, name):set_generated()
+                            resolved_name = pwc_params[param_id]
+                            if resolved_name then
+                                t:add(pf.pop_ptr_name, resolved_name):set_generated()
                             end
+                        end
+                        -- Plan 2: distinguish POINTER SET from POINTER
+                        -- READ/REQUEST. A frame with bytes 4-5 == 0 (raw
+                        -- pointer value zero) is the chair-side asking
+                        -- "what's currently pointed at" — it carries no
+                        -- new target and must NOT touch the active
+                        -- binding. A frame with non-zero pointer value
+                        -- IS setting a new target: replace the binding
+                        -- if we have a trusted name; invalidate if we
+                        -- don't (so the subsequent DATA frame doesn't
+                        -- inherit a stale name).
+                        local ptr_raw_value = bit.bor(bit.lshift(p_sub, 8), p_idx)
+                        if ptr_raw_value ~= 0 then
+                            if resolved_name then
+                                track_pointer(pinfo, this_node, other,
+                                              param_id, resolved_name)
+                            else
+                                invalidate_pointer(pinfo, this_node, other)
+                            end
+                        end
+                    elseif reg == 0x8F then
+                        -- Plan 2: DATA-register frame — look up the most
+                        -- recent POINTER setup from the same node-pair and
+                        -- bind. The value16/value32 fields above are the
+                        -- bytes; the binding tells you which parameter the
+                        -- value belongs to.
+                        local b = lookup_pointer_binding(pinfo, this_node, other)
+                        if b then
+                            t:add(pf.pop_binds_pid,  b.pid):set_generated()
+                            t:add(pf.pop_binds_name, b.name):set_generated()
+                            t:add(pf.pop_binds_src,  b.frame_no):set_generated()
                         end
                     end
                 end
@@ -878,11 +981,16 @@ local function decode_pop_std(tvb, t, cid)
                     -- POINTER fallback (data layout not matching idx/sub)
                     extra_str = string.format("  ptr=0x%04X", v16)
                 elseif reg == 0x8F and not ascii_text then
-                    -- Data value
+                    -- Data value. Plan 2: if the prior POINTER bound this
+                    -- frame to a parameter, surface that in the summary so
+                    -- the reader doesn't have to scroll back to find which
+                    -- parameter the value is for.
+                    local b = lookup_pointer_binding(pinfo, this_node, other)
+                    local bind_str = b and string.format(" → param %d: %s", b.pid, b.name) or ""
                     if v32 < 0x10000 then
-                        extra_str = string.format("  value=0x%04X (%d)", v16, v16)
+                        extra_str = string.format("  value=0x%04X (%d)%s", v16, v16, bind_str)
                     else
-                        extra_str = string.format("  value=0x%08X", v32)
+                        extra_str = string.format("  value=0x%08X%s", v32, bind_str)
                     end
                 end
             end
@@ -1028,7 +1136,7 @@ end
 -- Standard-frame (11-bit) decoders -------------------------------------------
 -- All rules below are from rnet_utils.py:decode_frame() (lines 269-310).
 
-local function decode_std(tvb, t, cid, is_rtr)
+local function decode_std(tvb, t, cid, is_rtr, pinfo)
     if cid == 0x000 then
         t:add(pf.class, is_rtr and "Sleep all devices" or "Sleep command")
         t:add(pf.summary, is_rtr and "Sleep all (RTR)" or "Sleep cmd")
@@ -1133,7 +1241,7 @@ local function decode_std(tvb, t, cid, is_rtr)
         return "ModeCtl"
     elseif bit.band(cid, 0x7E0) == 0x780 then
         -- POP standard-ID frame (any of 0x780..0x79F).
-        return decode_pop_std(tvb, t, cid)
+        return decode_pop_std(tvb, t, cid, pinfo)
     elseif cid == 0x7A0 then
         -- Programmer presence announcement. Sent by the Programmer when it
         -- joins the bus. Per frame-class glossary notes +
@@ -1620,6 +1728,9 @@ end
 -- Main dissector -------------------------------------------------------------
 
 function rnet.dissector(tvb, pinfo, tree)
+    -- Reset per-file dissector state on a new file (frame 1, unvisited).
+    -- Safe no-op on the common in-file re-dissection case.
+    _maybe_reset_binding_state(pinfo)
     -- Pull CAN metadata from the SocketCAN dissector below us.
     local fi_id  = f_id()
     if fi_id == nil then return 0 end          -- not a CAN frame
@@ -1635,7 +1746,7 @@ function rnet.dissector(tvb, pinfo, tree)
     if is_xtd then
         tag = decode_xtd(tvb, t, cid, is_rtr)
     else
-        tag = decode_std(tvb, t, cid, is_rtr)
+        tag = decode_std(tvb, t, cid, is_rtr, pinfo)
     end
 
     pinfo.cols.protocol = "R-Net"
