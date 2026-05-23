@@ -313,41 +313,54 @@ tshark -o rnet.show_evidence:TRUE \
        -r capture.pcapng -Y 'rnet.confidence == "Code"'
 ```
 
-## Protocol layering
+## R-Net, ReBus, POP — three names, three different things
 
-R-Net is a four-layer stack. Knowing which layer a frame belongs to
-makes the rest of the dissector's labels make sense.
+These three terms get conflated everywhere (including in PGDT's own
+marketing material). They're not synonyms. The dissector's labels
+follow the engineering distinction from
+`DongleInterface.dll`'s class structure:
 
-```
-Layer 4  — POP (Parameter Object Protocol) — application
-                  parameter reads/writes, transfers, the bulk of what
-                  this dissector decodes per-frame.
-Layer 3  — ReBus — session
-                  PGDT's session-layer protocol. State machine
-                  (CXTN_NONE → CXTN_CAN → CXTN_RNET →
-                   CXTN_UPLOAD/DOWNLOAD). Carries the chair-attach
-                  4-frame handshake (0x1E84/85/86/87), the auth
-                  exchange, the chair-serial heartbeat, and the
-                  Transfer Complete sentinel (0x1E80000F).
-Layer 2  — CAN-ID namespace
-                  STD vs XTD; per-CAN-ID-prefix decoding rules
-                  (POP-std 0x780-0x79F, POP-ext 0x1E0..0x1E7,
-                  ReBus 0x1E8X, application 0x14XX/0x1CXX/etc.).
-Layer 1  — CAN 2.0B physical @ 125 kbit/s
-                  Standard automotive CAN, up to 15 modules per bus.
-```
+| Name      | What it is                                                              | DLL class                |
+|-----------|-------------------------------------------------------------------------|--------------------------|
+| **R-Net** | The umbrella protocol / system. Session management, device enumeration, slot assignment, authentication, time, event log, AND data transfer. | `CRnetInterface` (~100 methods) |
+| **ReBus** | ONE sub-protocol within R-Net: data transfer (Download / Upload / SegmentedDownload / QuickReadE / QuickWriteE). Not session management. Not auth. | `CRebusInterface` (~28 methods) |
+| **POP**   | A wire-message FORMAT. ReBus uses POP frames to serialize its data-transfer operations onto the CAN bus. Lives in CAN ID ranges 0x78X/0x79X (POP-std) and 0x1E0XXXXX-0x1E7FFFFF (POP-ext). | `CPOPMsg` (~30 wire-format accessors) |
 
-A few labels in the dissector reference these layers explicitly:
+Concretely:
 
-- `ReBus attach handshake step 1..4` on 0x1E84..87 frames
-- `Transfer Complete sentinel (ReBus CXTN_UPLOAD/DOWNLOAD → CXTN_RNET)`
-  on 0x1E80000F
-- `POP std` / `POP ext` for application-layer frames
+- **All POP frames are R-Net frames; not all R-Net frames are POP
+  frames.** Joystick, heartbeat, motor, lights, status, faults — all
+  R-Net but none POP. The dissector's per-frame-class taxonomy
+  reflects this distinction.
+- **POP is NOT a layer above ReBus.** It's the wire format ReBus
+  serializes its operations into. ReBus → uses CPOPMsg → rides on
+  CCANMsg → CAN 2.0B physical.
+- **The R-Net session state machine** (`CXTN_NONE → CXTN_CAN →
+  CXTN_RNET → CXTN_UPLOAD/CXTN_DOWNLOAD`) lives on
+  `CRnetInterface`, not on `CRebusInterface`. The chair-attach
+  4-frame handshake (0x1E84/85/86/87) and the Transfer Complete
+  sentinel (0x1E80000F) are R-Net session-control markers, NOT
+  ReBus messages and NOT POP frames — they're in the 0x1E8XXXXX
+  range, OUTSIDE the POP-ext namespace by design.
 
-For a deeper picture of the session-layer state transitions in a
+PGDT marketing/dealer material uses "ReBus" loosely to mean "the
+R-Net protocol" — that's not wrong at the dealer-facing level of
+abstraction, but it conflates the umbrella class with one of its
+components. This dissector uses the engineering-precise meaning.
+
+A few labels in the dissector reference these distinctions explicitly:
+
+- `R-Net attach handshake step 1..4` on 0x1E84..87 frames
+  (R-Net session control, NOT a ReBus operation)
+- `Transfer Complete sentinel (R-Net CXTN_UPLOAD/DOWNLOAD → CXTN_RNET)`
+  on 0x1E80000F (R-Net state transition that wraps up a ReBus transfer)
+- `POP (standard-ID)` / `POP (extended-ID)` for actual POP-formatted
+  application-layer frames
+
+For a deeper view of the R-Net session state transitions in a
 specific capture (when each transfer opens, completes, and returns
-to idle), see the `rebus_state_timeline.py` companion tool in the
-underlying R-Net research repository.
+to CXTN_RNET), see the `rnet_state_timeline.py` companion tool in
+the underlying R-Net research repository.
 
 ## POP frames — the structural decode
 

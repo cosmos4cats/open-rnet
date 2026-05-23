@@ -1250,16 +1250,18 @@ local function decode_xtd(tvb, t, cid, is_rtr)
     elseif bit.band(cid, 0xFFFFFF00) == 0x1FB00000 then
         return decode_device_enum(tvb, t, cid)
     elseif cid == 0x1E80000F then
-        -- Transfer Complete sentinel — signals the ReBus session-layer
-        -- transition CXTN_UPLOAD/DOWNLOAD → CXTN_RNET. Marks the end of
-        -- a POP-extended segmented transfer; zero-payload (DLC=0), the
-        -- information IS the ID. Outside the POP-extended namespace by
-        -- design (it's a session-layer protocol-control marker, not a
-        -- POP application message).
+        -- Transfer Complete sentinel — marks the end of a ReBus
+        -- data-transfer operation. The state transition CXTN_UPLOAD/
+        -- DOWNLOAD → CXTN_RNET lives on CRnetInterface (R-Net session
+        -- state machine), not CRebusInterface. The transfer itself is
+        -- ReBus; the surrounding state is R-Net. Zero-payload (DLC=0),
+        -- the information IS the ID. Outside the POP-extended namespace
+        -- — it's an R-Net session-control marker, not a POP-formatted
+        -- application message.
         -- Evidence: extract_config_data.py:68-69 (literal handler);
         -- DongleInterface.dll wire-format §1059; RNET_PROTOCOL_LAYER_MAP.md.
-        t:add(pf.class, "Transfer Complete sentinel (ReBus UPLOAD/DOWNLOAD → RNET)")
-        t:add(pf.summary, "Transfer complete — ReBus returns to CXTN_RNET")
+        t:add(pf.class, "Transfer Complete sentinel (R-Net CXTN_UPLOAD/DOWNLOAD → CXTN_RNET)")
+        t:add(pf.summary, "ReBus transfer complete — R-Net returns to CXTN_RNET")
         add_evidence(t, "Code", "extract_config_data.py:68-69 + DongleInterface.dll wire-format §1059")
         return "XferDone"
     elseif bit.band(bit.rshift(cid, 18), 0x7E0) == 0x780 then
@@ -1498,24 +1500,32 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         add_evidence(t, "Inferred", "hackathon-only observation, no corpus citation")
         return "Event"
     elseif bit.band(cid, 0xFFF00000) == 0x1E800000 then
-        -- 0x1E8X = ReBus session-layer protocol-control namespace.
-        -- POP (application layer) runs on top of ReBus (session layer);
-        -- this is where ReBus state-machine transitions show up on the
-        -- wire. Outside POP-ext: `(0x1E8X >> 18) & 0x7E0 = 0x7A0 ≠ 0x780`.
+        -- 0x1E8X = R-Net session-control namespace (NOT POP, NOT ReBus).
+        -- Frames here are R-Net session/control markers — they live
+        -- outside the POP-ext namespace by design:
+        -- `(0x1E8X >> 18) & 0x7E0 = 0x7A0 ≠ 0x780`. The R-Net session
+        -- state machine (CXTN_NONE → CXTN_CAN → CXTN_RNET →
+        -- CXTN_UPLOAD/DOWNLOAD) lives on CRnetInterface; ReBus
+        -- (CRebusInterface) is a sub-protocol within R-Net that handles
+        -- data transfers and uses POP-ext as its wire format.
         --
         -- subtype = bits 18-16 (top nibble after the 0x8):
-        --   N=0   → Transfer Complete; CXTN_UPLOAD/DOWNLOAD → CXTN_RNET.
-        --           Low nibble of tail = target slot (0x000F = Programmer).
-        --   N=4-7 → 4-frame chair-attach handshake (CXTN_CAN → CXTN_RNET).
-        --           Fires within ~4ms at chair-attach time, before any
-        --           Transfer Complete. Same chair across years produces
-        --           identical N=6 and N=7 low-16-bit fingerprints.
+        --   N=0   → Transfer Complete sentinel; signals the end of a
+        --           ReBus data-transfer operation (CXTN_UPLOAD/DOWNLOAD
+        --           → CXTN_RNET). Low nibble of tail = target slot
+        --           (0x000F = Programmer).
+        --   N=4-7 → 4-frame chair-attach handshake (CXTN_CAN → CXTN_RNET
+        --           transition, R-Net session-management not ReBus
+        --           data-transfer). Fires within ~4ms at chair-attach
+        --           time, before any Transfer Complete. Same chair
+        --           across years produces identical N=6 and N=7
+        --           low-16-bit fingerprints.
         --           Evidenced in POP_FRAME_FAMILY_DECODES_2026-05-23.md.
         local subtype = bit.band(bit.rshift(cid, 16), 0xF)
         local tail = bit.band(cid, 0xFFFF)
         local label, summary, conf, src
         if subtype == 0 then
-            label = "Transfer Complete sentinel (ReBus CXTN_UPLOAD/DOWNLOAD → CXTN_RNET)"
+            label = "Transfer Complete sentinel (R-Net CXTN_UPLOAD/DOWNLOAD → CXTN_RNET)"
             if tail == 0x000F then
                 summary = "Transfer Complete → Programmer (slot 15)"
             else
@@ -1523,25 +1533,25 @@ local function decode_xtd(tvb, t, cid, is_rtr)
             end
             conf, src = "Code", "extract_config_data.py:68-69 + DongleInterface.dll wire-format §1059"
         elseif subtype == 4 then
-            label = "ReBus attach handshake step 1 (Programmer announce)"
-            summary = "ReBus attach 1/4 — Programmer announce (CXTN_CAN→CXTN_RNET begin)"
+            label = "R-Net attach handshake step 1 (Programmer announce)"
+            summary = "R-Net attach 1/4 — Programmer announce (CXTN_CAN→CXTN_RNET begin)"
             conf, src = "Documented", "POP_FRAME_FAMILY_DECODES_2026-05-23.md + RNET_PROTOCOL_LAYER_MAP.md"
         elseif subtype == 5 then
-            label = "ReBus attach handshake step 2 (chair ack)"
-            summary = "ReBus attach 2/4 — chair ack"
+            label = "R-Net attach handshake step 2 (chair ack)"
+            summary = "R-Net attach 2/4 — chair ack"
             conf, src = "Documented", "POP_FRAME_FAMILY_DECODES_2026-05-23.md + RNET_PROTOCOL_LAYER_MAP.md"
         elseif subtype == 6 then
-            label = "ReBus attach handshake step 3 (chair fingerprint #1)"
-            summary = string.format("ReBus attach 3/4 — chair fingerprint #1 = 0x%04X", tail)
+            label = "R-Net attach handshake step 3 (chair fingerprint #1)"
+            summary = string.format("R-Net attach 3/4 — chair fingerprint #1 = 0x%04X", tail)
             conf, src = "Documented", "POP_FRAME_FAMILY_DECODES_2026-05-23.md (per-chair persistent identifier)"
         elseif subtype == 7 then
-            label = "ReBus attach handshake step 4 (chair fingerprint #2)"
-            summary = string.format("ReBus attach 4/4 — chair fingerprint #2 = 0x%04X (CXTN_RNET ready)", tail)
+            label = "R-Net attach handshake step 4 (chair fingerprint #2)"
+            summary = string.format("R-Net attach 4/4 — chair fingerprint #2 = 0x%04X (CXTN_RNET ready)", tail)
             conf, src = "Documented", "POP_FRAME_FAMILY_DECODES_2026-05-23.md (per-chair persistent identifier)"
         else
-            label = string.format("0x1E8X ReBus sentinel (N=%d) [unverified]", subtype)
-            summary = string.format("ReBus sentinel N=%d tail=0x%04X (subtype semantics TBD)", subtype, tail)
-            conf, src = "Inferred", "POP 0x1E8X sentinel namespace — subtype N=1-3 not yet observed"
+            label = string.format("0x1E8X R-Net session sentinel (N=%d) [unverified]", subtype)
+            summary = string.format("R-Net session sentinel N=%d tail=0x%04X (subtype semantics TBD)", subtype, tail)
+            conf, src = "Inferred", "0x1E8X R-Net session namespace — subtype N=1-3 not yet observed"
         end
         t:add(pf.class, label)
         t:add(pf.summary, summary)
