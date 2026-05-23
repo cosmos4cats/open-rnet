@@ -542,6 +542,83 @@ def test_algo_pop_namespace_membership():
         assert ((cid >> 18) & 0x7E0) != 0x780, f"0x{cid:08X} should NOT be POP-ext"
 
 
+# ---------------------------------------------------------------------------
+# Category 6: Provenance / preference behavior (added 2026-05-23)
+# ---------------------------------------------------------------------------
+
+def test_decode_jsm_serial_heartbeat_pre_init_label():
+    """At power-on the JSM emits all-zero serial-heartbeat frames before
+    loading its serial from EEPROM. Those frames must show the explicit
+    'pre-init' label rather than a misleading 'serial=00000000'. Regression
+    test for the audit fix on 2026-05-23."""
+    if not have_capture("poweronJSMsh"):
+        pytest.skip("poweronJSMsh capture not present")
+    # Use the dissector's summary field rather than scraping the info column,
+    # so this test is robust to column-width changes.
+    rows = fields("poweronJSMsh",
+                  'can.id == 0xE && can.flags.xtd == 0',  # STD 0x00E serial HB
+                  ["rnet.summary"])
+    summaries = [r[0] for r in rows if r and r[0]]
+    assert summaries, "no serial-heartbeat frames found in poweronJSMsh"
+    # Every heartbeat in this short power-on capture must be pre-init.
+    bad = [s for s in summaries if "pre-init" not in s]
+    assert not bad, (
+        f"expected all 0x00E heartbeats in poweronJSMsh to be labeled "
+        f"'pre-init'; got non-pre-init summaries: {bad[:3]}"
+    )
+    # And explicitly: no frame should display the misleading raw zero serial.
+    assert not any("serial=00000000" in s for s in summaries), (
+        "found 'serial=00000000' literal — labeling regressed to raw bytes"
+    )
+
+
+def test_pref_show_evidence_toggle_controls_both_fields():
+    """The rnet.show_evidence preference is a single switch that controls
+    BOTH the rnet.confidence and rnet.evidence fields together. Default off:
+    neither field appears. With -o rnet.show_evidence:TRUE: both appear.
+    Regression test for the design decision documented in
+    add_evidence() — confidence and source are emitted as a unit."""
+    if not have_capture("poweronJSMsh"):
+        pytest.skip("poweronJSMsh capture not present")
+
+    # OFF: neither field should appear in expanded detail.
+    off_out = tshark("poweronJSMsh", extra=["-V"])
+    assert "rnet.confidence" not in off_out and "Evidence kind" not in off_out, \
+        "rnet.confidence field appeared with pref OFF"
+    assert "rnet.evidence" not in off_out and "Evidence source" not in off_out, \
+        "rnet.evidence field appeared with pref OFF"
+
+    # ON: both fields should appear at least once.
+    on_out = tshark("poweronJSMsh",
+                    extra=["-V", "-o", "rnet.show_evidence:TRUE"])
+    assert "Evidence kind" in on_out, "rnet.confidence field missing with pref ON"
+    assert "Evidence source" in on_out, "rnet.evidence field missing with pref ON"
+
+
+def test_evidence_tier_distribution_is_documented():
+    """The README claims a specific Code / Documented / Inferred distribution
+    in add_evidence() calls. If the distribution drifts (e.g. someone adds 10
+    Inferred entries without verifying them), the README's confidence claim
+    becomes stale. This test pins the categorization so drift surfaces in CI
+    rather than silently in the published docs."""
+    dissector_text = Path(LUA).read_text()
+    code_count = len(re.findall(r'add_evidence\(t,\s*"Code",', dissector_text))
+    doc_count = len(re.findall(r'add_evidence\(t,\s*"Documented",', dissector_text))
+    inf_count = len(re.findall(r'add_evidence\(t,\s*"Inferred",', dissector_text))
+    total = code_count + doc_count + inf_count
+    assert total > 0, "no add_evidence() calls found — refactor broke parsing"
+    # As of 2026-05-23: 27 / 15 / 13 = 55. Allow modest drift but fail loudly
+    # if the proportions move meaningfully (e.g. someone adds a flood of
+    # Inferred entries without verifying them).
+    assert total >= 50, f"add_evidence call total dropped to {total} (was 55+)"
+    inferred_pct = inf_count / total
+    assert inferred_pct < 0.40, (
+        f"Inferred share grew to {inferred_pct:.0%} of {total} calls; "
+        f"either verify some up to Documented/Code or update the README's "
+        f"published distribution to reflect the new state."
+    )
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))
