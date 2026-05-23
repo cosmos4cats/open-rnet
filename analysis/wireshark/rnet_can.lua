@@ -186,6 +186,24 @@ local pf = {
 rnet.fields = {}
 for _, v in pairs(pf) do table.insert(rnet.fields, v) end
 
+-- Plan 6: Wireshark expert-info markers. Surface dissector-flagged
+-- anomalies in Wireshark's "Expert Information" panel and color the
+-- packet list at the corresponding severity. Kept narrow — markers
+-- only on conditions the per-frame label can't naturally surface
+-- with the same visibility (filtering on text labels is harder than
+-- on severity).
+local pe = {
+    -- 0x1E8X sentinel with a subtype we haven't observed on the wire
+    -- (N=1, 2, 3). Fires extremely rarely on real captures — when it
+    -- does, the frame is worth investigating because it's potentially
+    -- a new piece of R-Net session control we haven't documented.
+    sentinel_unknown_subtype = ProtoExpert.new(
+        "rnet.expert.sentinel_unknown_subtype",
+        "0x1E8X session sentinel with subtype not yet documented (N=1/2/3) — worth investigating",
+        expert.group.UNDECODED, expert.severity.NOTE),
+}
+rnet.experts = {pe.sentinel_unknown_subtype}
+
 -- User preference: show provenance info (evidence kind + source citation)
 -- for each frame. Off by default — most users running the dissector want to
 -- read the protocol, not audit it. Enable when verifying the dissector's
@@ -1838,8 +1856,15 @@ local function decode_xtd(tvb, t, cid, is_rtr)
             summary = string.format("R-Net session sentinel N=%d tail=0x%04X (subtype semantics TBD)", subtype, tail)
             conf, src = "Inferred", "0x1E8X R-Net session namespace — subtype N=1-3 not yet observed"
         end
-        t:add(pf.class, label)
+        local class_item = t:add(pf.class, label)
         t:add(pf.summary, summary)
+        -- Plan 6: expert-info marker on unknown sentinel subtypes —
+        -- packets get a NOTE-severity dot in the packet list and show
+        -- up in Expert Information panel for easy investigation.
+        if subtype ~= 0 and subtype ~= 4 and subtype ~= 5 and
+           subtype ~= 6 and subtype ~= 7 then
+            class_item:add_proto_expert_info(pe.sentinel_unknown_subtype)
+        end
         add_evidence(t, conf, src)
         return "Sentinel"
     else

@@ -83,6 +83,36 @@ def test_synthetic_frame_handled_without_lua_error(edge_pcap_dir, label):
     )
 
 
+def test_expert_info_fires_on_unknown_sentinel_subtypes(edge_pcap_dir):
+    """Plan 6: the 0x1E8X expert-info marker should fire on unknown
+    subtypes (N=1, 2, 3) and NOT fire on documented ones (N=0/4/5/6/7).
+
+    Asserts both the positive (fires) and negative (doesn't fire) cases.
+    Anchored on synthetic sentinel_subtype_1 (positive) vs
+    transfer_complete_non_programmer which is N=0 (negative)."""
+    # Positive: subtype 1 should trigger the marker
+    stdout, stderr, rc = _run_dissector(edge_pcap_dir["sentinel_subtype_1"])
+    assert rc == 0, stderr
+    proc = subprocess.run(
+        ["tshark", "-X", f"lua_script:{LUA}",
+         "-r", str(edge_pcap_dir["sentinel_subtype_1"]), "-V"],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert "session sentinel with subtype not yet documented" in proc.stdout, (
+        "expected expert-info marker on N=1 sentinel; got:\n" + proc.stdout[:600]
+    )
+    # Negative: subtype 0 (Transfer Complete) should NOT trigger it
+    proc = subprocess.run(
+        ["tshark", "-X", f"lua_script:{LUA}",
+         "-r", str(edge_pcap_dir["transfer_complete_non_programmer"]), "-V"],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert "session sentinel with subtype not yet documented" not in proc.stdout, (
+        "marker should NOT fire on N=0 (Transfer Complete); got expert info "
+        "anyway"
+    )
+
+
 def test_synthetic_pcap_writer_self_check():
     """Sanity: the pcap writer itself should produce files tshark can
     parse as CAN. If this test fails, the synthetic-frame tests above
