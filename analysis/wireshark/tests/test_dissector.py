@@ -31,10 +31,25 @@ import pytest
 # ---------------------------------------------------------------------------
 
 DISSECTOR_DIR = Path(__file__).resolve().parent.parent
-REPO_ROOT = DISSECTOR_DIR.parent.parent
 LUA = str(DISSECTOR_DIR / "rnet_can.lua")
-OPEN_RNET_CAPTURES = REPO_ROOT / "captures"
-HACKATHON_LOG = OPEN_RNET_CAPTURES / "2026_AT_hackathon.log"
+
+# Auto-detect capture location. The dissector is mirrored between two trees
+# with different relative paths to the open-rnet captures, so this preamble
+# tries both layouts. Whichever exists wins; the test file stays identical
+# in both trees and no manual sync is needed.
+_candidates = [
+    DISSECTOR_DIR.parent.parent / "captures",        # open-rnet/analysis/wireshark/
+    DISSECTOR_DIR.parent / "open-rnet" / "captures", # sibling-repo layout
+]
+OPEN_RNET_CAPTURES = next((p for p in _candidates if p.exists()), _candidates[0])
+
+# Hackathon log can live next to the captures, or next to the dissector itself
+# (older layout). Prefer the in-tree location if both exist.
+_hack_candidates = [
+    OPEN_RNET_CAPTURES / "2026_AT_hackathon.log",
+    DISSECTOR_DIR / "2026_AT_hackathon.log",
+]
+HACKATHON_LOG = next((p for p in _hack_candidates if p.exists()), _hack_candidates[0])
 
 
 def cap_path(name: str) -> str:
@@ -301,7 +316,7 @@ def test_decode_lighting_lamp_test_d5d5():
         pytest.skip("July12_lights not present")
     # Find a lighting frame with payload D5 D5
     rows = fields("July12_lights",
-                  'rnet.class == "Lighting control"',
+                  'rnet.class contains "Lighting"',
                   ["rnet.summary"])
     all_on = [r[0] for r in rows
               if "Flood" in r[0] and "Hazard" in r[0] and "transition" not in r[0]]
@@ -361,14 +376,14 @@ def test_decode_pm_heartbeat_byte0_pop_layout():
     if not have_capture("hackathon"):
         pytest.skip("hackathon not present")
     # PM heartbeat (slot 0): byte 0 in {0xC0, 0xC1}
-    rows_pm = fields("hackathon", 'rnet.class == "PM heartbeat"',
+    rows_pm = fields("hackathon", 'rnet.class contains "PM heartbeat"',
                      ["rnet.pm_hb.byte0"])
     pm_bytes = set(r[0].lower() for r in rows_pm)
     assert {"0xc0", "0xc1"}.issubset(pm_bytes), (
         f"PM heartbeat byte-0 should include both 0xC0 and 0xC1; saw {pm_bytes}"
     )
     # IOM/ISM heartbeat (slot 2): byte 0 dominantly 0xC2
-    rows_ism = fields("hackathon", 'rnet.class == "IOM/ISM heartbeat"',
+    rows_ism = fields("hackathon", 'rnet.class contains "IOM/ISM heartbeat"',
                       ["rnet.pm_hb.byte0"])
     if rows_ism:
         ism_bytes = Counter(r[0].lower() for r in rows_ism)
@@ -490,30 +505,54 @@ def test_decode_pointer_idx_sub_decomposition():
     """POINTER register frames should decompose bytes 4 and 6 as separate
     pointer-index and sub-index fields, per janschu99 dictionary line 14
     ('78M#2P810000Xx00Vv00 : check if pointer Xx sub Vv exists').
+
+    Anchored on programmer_write frame 71 which is a documented POINTER
+    setup for param BackUp (idx=6, sub=1, param_id=262 via (sub<<8)|idx).
     """
     if not have_capture("programmer_write"):
         pytest.skip("programmer_write not present")
     rows = fields("programmer_write",
-                  'rnet.pop.pointer_idx',
-                  ["rnet.pop.pointer_idx", "rnet.pop.pointer_sub"])
-    assert rows, "no pointer_idx field present in programmer_write"
-    # Sanity: at least one frame should have idx >= 6 (the documented
-    # capture has pointers up through 10+)
-    idxs = set(int(r[0].replace("0x",""), 16) for r in rows)
-    assert max(idxs) >= 6, f"max pointer_idx = {max(idxs)}, expected >= 6"
+                  'frame.number == 71',
+                  ["rnet.pop.pointer_idx", "rnet.pop.pointer_sub",
+                   "rnet.pop.pointer_param_id"])
+    assert rows, "no frame 71 in programmer_write"
+    idx_s, sub_s, pid_s = rows[0]
+    idx = int(idx_s.replace("0x", ""), 16)
+    sub = int(sub_s.replace("0x", ""), 16)
+    pid = int(pid_s)
+    assert (idx, sub) == (6, 1), (
+        f"frame 71 expected (idx=6, sub=1) for BackUp POINTER setup; "
+        f"got (idx={idx}, sub={sub})"
+    )
+    assert pid == 262, (
+        f"frame 71 param_id should be 262 (= (1<<8) | 6 = BackUp); got {pid}"
+    )
 
 
 def test_decode_pop_value_field_labeling():
     """For Quick POP frames on the DATA register, bytes 4-7 should be
     labeled as value (not Size). This was previously mislabeled as 'Size'
     for any frame with non-zero bytes 4-7.
+
+    Two assertions: (a) DATA-register frames DO get value16 populated,
+    (b) DATA-register frames do NOT also have pop_size populated — Size
+    belongs only on segmented-transfer setup frames (TC=1 + CRCFlag=1).
     """
     if not have_capture("programmer_write"):
         pytest.skip("programmer_write not present")
-    rows = fields("programmer_write",
-                  'rnet.pop.register_name == "DATA" and rnet.pop.value16',
-                  ["rnet.pop.value16"])
-    assert rows, "no DATA-register frames have value16 field"
+    with_value = count("programmer_write",
+                       'rnet.pop.register_name == "DATA" && rnet.pop.value16')
+    assert with_value > 10, (
+        f"only {with_value} DATA-register frames have value16; "
+        f"value-field labeling is probably broken"
+    )
+    with_size = count("programmer_write",
+                      'rnet.pop.register_name == "DATA" && rnet.pop.size')
+    assert with_size == 0, (
+        f"{with_size} DATA-register frames have pop_size populated — "
+        f"Size should only appear on setup frames (TC=1 + CRCFlag=1). "
+        f"The 'bytes 4-7 = Size on any frame' mislabel may have returned."
+    )
 
 
 def test_decode_odi_class_slot_appears():
@@ -598,27 +637,37 @@ def test_pref_show_evidence_toggle_controls_both_fields():
     assert "Evidence source" in on_out, "rnet.evidence field missing with pref ON"
 
 
-def test_evidence_tier_distribution_is_documented():
-    """The README claims a specific Code / Documented / Inferred distribution
-    in add_evidence() calls. If the distribution drifts (e.g. someone adds 10
-    Inferred entries without verifying them), the README's confidence claim
-    becomes stale. This test pins the categorization so drift surfaces in CI
-    rather than silently in the published docs."""
+def test_evidence_tier_distribution_matches_readme_claim():
+    """The README publishes a Code/Documented/Inferred distribution
+    table. If a contributor adds new add_evidence() calls and doesn't
+    update the README — or if a README update gets out of step with
+    the dissector — readers see a misleading confidence claim. This
+    test parses the README's published counts and asserts the
+    dissector matches.
+
+    Fails when EITHER the dissector OR the README has drifted. The
+    fix is the same in both directions: update both together.
+    """
     dissector_text = Path(LUA).read_text()
     code_count = len(re.findall(r'add_evidence\(t,\s*"Code",', dissector_text))
     doc_count = len(re.findall(r'add_evidence\(t,\s*"Documented",', dissector_text))
     inf_count = len(re.findall(r'add_evidence\(t,\s*"Inferred",', dissector_text))
-    total = code_count + doc_count + inf_count
-    assert total > 0, "no add_evidence() calls found — refactor broke parsing"
-    # As of 2026-05-23: 27 / 15 / 13 = 55. Allow modest drift but fail loudly
-    # if the proportions move meaningfully (e.g. someone adds a flood of
-    # Inferred entries without verifying them).
-    assert total >= 50, f"add_evidence call total dropped to {total} (was 55+)"
-    inferred_pct = inf_count / total
-    assert inferred_pct < 0.40, (
-        f"Inferred share grew to {inferred_pct:.0%} of {total} calls; "
-        f"either verify some up to Documented/Code or update the README's "
-        f"published distribution to reflect the new state."
+
+    # README is next to test_dissector.py's parent dir
+    readme = (DISSECTOR_DIR / "README.md").read_text()
+    # Parse rows like "| Code        |    27 | 49%  |"
+    row_re = re.compile(r'^\|\s*(Code|Documented|Inferred)\s*\|\s*(\d+)\s*\|',
+                        re.MULTILINE)
+    claimed = {tier: int(n) for tier, n in row_re.findall(readme)}
+    assert set(claimed) == {"Code", "Documented", "Inferred"}, (
+        f"README's distribution table missing or malformed; "
+        f"parsed: {claimed}"
+    )
+    actual = {"Code": code_count, "Documented": doc_count, "Inferred": inf_count}
+    assert claimed == actual, (
+        f"README's published distribution {claimed} doesn't match dissector "
+        f"actual {actual}. Update README.md's '#### Current distribution' "
+        f"table and this test will pass."
     )
 
 
@@ -722,6 +771,60 @@ def test_decode_rtc_broadcast_field_values():
     # Hour and minute should be plausible
     assert 0 <= int(h) <= 23 and 0 <= int(mn) <= 59, \
         f"implausible hour/min ({h}:{mn})"
+
+
+# ---------------------------------------------------------------------------
+# Category 7: Companion-artifact smoke tests
+# ---------------------------------------------------------------------------
+
+def test_pwc_params_json_well_formed():
+    """The vendored pwc_params.json snapshot (loaded by reassemble_transfers.py
+    AND embedded as a table in rnet_can.lua) must parse as JSON and have the
+    expected structure: numeric-string keys, non-empty string values.
+    Includes one anchor check that param_id 262 maps to BackUp — if that
+    breaks, every chair-actuator decode regresses silently.
+    """
+    import json
+    p = DISSECTOR_DIR / "pwc_params.json"
+    assert p.exists(), f"pwc_params.json missing at {p}"
+    data = json.loads(p.read_text())
+    assert len(data) > 800, f"pwc_params.json has only {len(data)} entries (expected ~966)"
+    bad_keys = [k for k in data if not k.isdigit()]
+    assert not bad_keys, f"pwc_params.json non-numeric keys: {bad_keys[:5]}"
+    bad_vals = [k for k, v in data.items() if not (isinstance(v, str) and v)]
+    assert not bad_vals, f"pwc_params.json entries with bad value: {bad_vals[:5]}"
+    assert data.get("262") == "BackUp", (
+        f"pwc_params.json[262] should be 'BackUp' (chair-actuator anchor); "
+        f"got {data.get('262')!r}"
+    )
+
+
+def test_rnet_dump_wrapper_produces_expected_format():
+    """The rnet-dump bash wrapper should emit candump-L-shaped output:
+    `(timestamp) iface CAN_ID  decoded-info` per frame, or a no-CAN-ID
+    variant for frames without a CAN ID. Catches regressions in the awk
+    pipeline (e.g. someone refactoring the field list and breaking the
+    printf format)."""
+    import subprocess
+    wrapper = DISSECTOR_DIR / "rnet-dump"
+    if not wrapper.exists() or not os.access(str(wrapper), os.X_OK):
+        pytest.skip(f"rnet-dump wrapper not present or not executable at {wrapper}")
+    if not have_capture("poweronJSMsh"):
+        pytest.skip("poweronJSMsh capture not present")
+    proc = subprocess.run(
+        [str(wrapper), "-r", cap_path(CAPTURES["poweronJSMsh"])],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 0, f"rnet-dump exited {proc.returncode}: {proc.stderr}"
+    lines = [l for l in proc.stdout.splitlines() if l.strip()]
+    assert lines, "rnet-dump produced no output"
+    # Every non-blank line should start with (decimal.decimal) timestamp
+    line_re = re.compile(r'^\(\d+\.\d+\)\s')
+    bad = [l for l in lines if not line_re.match(l)]
+    assert not bad, (
+        f"{len(bad)} rnet-dump line(s) don't match '(t) ...' format; "
+        f"first bad: {bad[0]!r}"
+    )
 
 
 if __name__ == "__main__":

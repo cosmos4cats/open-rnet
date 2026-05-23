@@ -1,0 +1,43 @@
+name: wireshark dissector tests
+
+# Runs the analysis/wireshark/tests/ pytest suite against the dissector.
+# Triggers on changes inside analysis/wireshark/ or the test captures so
+# unrelated repo changes don't burn CI minutes.
+
+on:
+  push:
+    paths:
+      - 'analysis/wireshark/**'
+      - 'captures/**'
+      - '.github/workflows/wireshark-dissector-tests.yml'
+  pull_request:
+    paths:
+      - 'analysis/wireshark/**'
+      - 'captures/**'
+      - '.github/workflows/wireshark-dissector-tests.yml'
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tshark
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tshark
+          tshark --version | head -1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install pytest
+        run: pip install --quiet pytest
+
+      - name: Run dissector tests
+        working-directory: analysis/wireshark
+        run: python -m pytest tests/ -v
