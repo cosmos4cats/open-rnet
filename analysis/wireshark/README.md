@@ -772,7 +772,7 @@ analysis/wireshark/
   README.md                — this file
   reassemble_transfers.py  — POP transfer reassembly companion
   pwc_params.json          — vendored Permobil PWC param_id → name snapshot
-  tests/test_dissector.py  — pytest suite (36 tests)
+  tests/test_dissector.py  — pytest suite (38 tests)
 
 ../../captures/
   2026_AT_hackathon.log    — hackathon candump (source for Table D)

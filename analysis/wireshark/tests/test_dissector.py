@@ -644,6 +644,57 @@ def test_rnd_address_emits_stable_prefix_and_caveated_name():
     )
 
 
+def test_auth_response_labels_distinguish_serial_bytes_from_extended_round():
+    """Auth response frames at seq 0-3 carry the responding module's
+    serial byte; seq 4-7 are extended/verification rounds. The labels
+    must make this distinction explicit so readers don't think 'val=0x00'
+    on seq 4-7 means the dissector lost data."""
+    if not have_capture("hackathon"):
+        pytest.skip("hackathon dump not present")
+    # seq 0-3 responses — summary must contain "serial[N]".
+    # Filter via rnet.class (responses, not challenges) since the
+    # RTR bit lives in can.flags.rtr from the CAN dissector and we
+    # want a dissector-internal filter.
+    rows = fields("hackathon",
+                  'rnet.class == "Serial auth — response" && rnet.auth.seq <= 3',
+                  ["rnet.auth.seq", "rnet.summary"])
+    assert rows, "no auth-response seq 0-3 frames found"
+    bad = [(s, sm) for s, sm in rows if "serial[" not in sm]
+    assert not bad, f"some seq 0-3 frames lack 'serial[N]=' in summary: {bad[:3]}"
+    # seq 4-7 — summary must say "extended round"
+    rows = fields("hackathon",
+                  'rnet.class == "Serial auth — response" && rnet.auth.seq >= 4',
+                  ["rnet.auth.seq", "rnet.summary"])
+    assert rows, "no auth-response seq 4-7 frames found"
+    bad = [(s, sm) for s, sm in rows if "extended round" not in sm]
+    assert not bad, f"some seq 4-7 frames lack 'extended round' in summary: {bad[:3]}"
+
+
+def test_rnd_address_emits_gui_path_for_lookups_that_have_one():
+    """When a POP frame hits a .rnd address that we have GUI-path
+    metadata for, the rnet.pop.addr_path field must be populated
+    alongside name and prefix. The path tells the reader WHERE in the
+    dealer menus this parameter lives — often more useful than the
+    cryptic internal name. Frame 281 of programmer_write hits
+    .rnd[0x0048] = ICS_ABS_MIN_ELEVATOR_TRAVEL @ Seating~ICS~OEM Factory."""
+    if not have_capture("programmer_write"):
+        pytest.skip("programmer_write capture not present")
+    rows = fields("programmer_write",
+                  'rnet.pop.addr_prefix == "ICS"',
+                  ["rnet.pop.addr_name", "rnet.pop.addr_path"])
+    assert rows, "no ICS-prefix .rnd address frames found"
+    name, path = rows[0][0], rows[0][1]
+    assert name.startswith("ICS_"), f"expected ICS_ name; got {name!r}"
+    assert "~" in path, (
+        f"expected GUI path (tilde-separated) for ICS .rnd entry; "
+        f"got {path!r} — path field probably not emitting"
+    )
+    assert path.startswith("Seating") or path.startswith("Inhibits") \
+        or path.startswith("Engineering") or path.startswith("Controls"), (
+        f"expected path to start with a top-level menu name; got {path!r}"
+    )
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))
