@@ -123,8 +123,31 @@ R-Net's protocol has been reverse-engineered in three streams:
 
 This dissector takes (1) as its spine for general control frames and
 (3) as its spine for the POP (Parameter Object Protocol) wire format.
-Every decoded field carries an `rnet.evidence` field pointing at the
-source. Entries derived **only** from (2) are tagged `[unverified]`.
+
+### Evidence-kind labels (off by default)
+
+When you want to audit a decode, enable the `Show evidence + confidence`
+preference (Edit → Preferences → Protocols → RNET, or
+`-o rnet.show_evidence:TRUE` in tshark). Each frame then carries two
+generated fields:
+
+- **`rnet.confidence`** — one of:
+  - **Code** — runnable decoder code in this repo, Ghidra decompile of
+    the DLL that drives the protocol, or empirical cross-validation
+    (XOR-table match, 500/500 fingerprint match).
+  - **Documented** — a single documented source (community dictionary,
+    one Ghidra finding without cross-corroboration).
+  - **Inferred** — family-analogy from a documented neighbor, structural
+    hypothesis, conjectural positional pairing, or hackathon-only
+    observation. Treat as a hint, not a fact.
+
+- **`rnet.evidence`** — the raw source citation
+  (`rnet_utils.py:330`, `janschu99 RNETdictionary.txt:13`,
+  `DongleInterface.dll CPOPMsg class (Ghidra)`, etc.).
+
+Off by default because most users want to read the protocol, not audit
+it. The pref also makes `rnet.confidence == "Inferred"` a useful display
+filter for "show me everything the dissector isn't sure about."
 
 ## POP frames — the structural decode
 

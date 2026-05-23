@@ -164,10 +164,25 @@ local pf = {
     tlm_counter  = ProtoField.uint16("rnet.tlm.counter",  "Slow counter (bytes 1-2 LE u16)", base.DEC),
     tlm_const    = ProtoField.bytes ("rnet.tlm.const",    "Constant tail (bytes 3-5)"),
 
+    confidence  = ProtoField.string("rnet.confidence",  "Evidence kind (Code/Documented/Inferred)"),
     evidence    = ProtoField.string("rnet.evidence",    "Evidence source"),
 }
 rnet.fields = {}
 for _, v in pairs(pf) do table.insert(rnet.fields, v) end
+
+-- User preference: show provenance info (evidence kind + source citation)
+-- for each frame. Off by default — most users running the dissector want to
+-- read the protocol, not audit it. Enable when verifying the dissector's
+-- claims or chasing a specific decode.
+-- Toggle in Wireshark: Edit → Preferences → Protocols → RNET.
+-- Toggle in tshark:    -o rnet.show_evidence:TRUE
+rnet.prefs.show_evidence = Pref.bool(
+    "Show evidence + confidence",
+    false,
+    "When enabled, each frame's expanded detail view includes a "..
+    "Code/Documented/Inferred evidence-kind label AND the raw evidence-"..
+    "source citation (e.g. 'rnet_utils.py:330'). When disabled, neither "..
+    "is shown.")
 
 -- Fields from the underlying SocketCAN dissector -----------------------------
 local f_id  = Field.new("can.id")
@@ -226,7 +241,35 @@ local function legacy_label(byte0)
     return m[byte0]
 end
 
-local function add_evidence(t, src) t:add(pf.evidence, src):set_generated() end
+-- Evidence kinds — what KIND of source backs each decode:
+--   "Code"        — runnable decoder code in this repo (rnet_utils.py,
+--                   JoyLocal.py), Ghidra decompile of the DLL artifact
+--                   that actually drives the protocol, or empirical
+--                   observation cross-validated across many frames
+--                   (XOR-table match, 500/500 fingerprint match).
+--                   Verifiable by reading the cited code/decompile or
+--                   re-running the empirical check.
+--   "Documented"  — a single documented source (community dictionary
+--                   entries from janschu99, a single Ghidra finding
+--                   without independent cross-corroboration, cJSM
+--                   display-protocol notes). Trustworthy author but
+--                   not independently verified by this project.
+--   "Inferred"    — family-analogy from a documented neighbor (e.g.
+--                   STD 0x051 ≈ STD 0x050 structure), structural
+--                   hypothesis, [CONJECTURAL] positional pairing, or
+--                   hackathon-only observations not yet matched
+--                   against another source. Treat as a hint, not a
+--                   fact.
+--
+-- Both fields are shown only when the rnet.show_evidence preference is
+-- enabled — showing the kind without the source is unfalsifiable, and
+-- showing the source without the kind loses the quick-scan summary.
+local function add_evidence(t, conf, src)
+    if rnet.prefs.show_evidence then
+        t:add(pf.confidence, conf):set_generated()
+        t:add(pf.evidence, src):set_generated()
+    end
+end
 
 -- Known XOR tables for the auth-frame validator. Evidence:
 --   Tables A, B, C: PROJECT_NOTES.md
@@ -3708,7 +3751,7 @@ local function decode_joystick(tvb, t, cid)
         end
         t:add(pf.summary, string.format("Joystick X=%+4d Y=%+4d%s", x, y, dir))
     end
-    add_evidence(t, "rnet_utils.py:330")
+    add_evidence(t, "Code", "rnet_utils.py:330")
     return "Joy"
 end
 
@@ -3721,7 +3764,7 @@ local function decode_speed(tvb, t, cid)
         t:add(pf.speed_pct, tvb(0,1))
         t:add(pf.summary, string.format("Speed range %3d%%", pct))
     end
-    add_evidence(t, "janschu99 RNETdictionary.txt:27 + diary:16 (0x00-0x64, quartile increments)")
+    add_evidence(t, "Documented", "janschu99 RNETdictionary.txt:27 + diary:16")
     return "Speed"
 end
 
@@ -3737,7 +3780,7 @@ local function decode_battery(tvb, t, cid)
         local bar = string.rep("█", bars) .. string.rep("░", 10-bars)
         t:add(pf.summary, string.format("Battery %3d%% %s", pct, bar))
     end
-    add_evidence(t, "rnet_utils.py:352")
+    add_evidence(t, "Code", "rnet_utils.py:352")
     return "Batt"
 end
 
@@ -3759,7 +3802,7 @@ local function decode_motor_current(tvb, t, cid)
             t:add(pf.summary, string.format("Motor current slot=%X = %d (LE u16; unit unknown)", slot, v))
         end
     end
-    add_evidence(t, "janschu99 categorized dictionary line 83 §14300X00 (drive motor current, LE u16, periodic 200ms)")
+    add_evidence(t, "Documented", "janschu99 categorized dictionary line 83 §14300X00")
     return "MotI"
 end
 
@@ -3771,7 +3814,7 @@ local function decode_distance(tvb, t, cid)
         t:add_le(pf.dist_left,  tvb(0,4))
         t:add_le(pf.dist_right, tvb(4,4))
     end
-    add_evidence(t, "rnet_utils.py:415")
+    add_evidence(t, "Code", "rnet_utils.py:415")
     return "Dist"
 end
 
@@ -3783,7 +3826,7 @@ local function decode_motor_enable(tvb, t, cid)
         t:add(pf.motor_en_l, tvb(0,1))
         t:add(pf.motor_en_r, tvb(1,1))
     end
-    add_evidence(t, "rnet_utils.py:430")
+    add_evidence(t, "Code", "rnet_utils.py:430")
     return "MotEn"
 end
 
@@ -3794,7 +3837,7 @@ local function decode_horn(tvb, t, cid)
     t:add(pf.slot, slot)
     t:add(pf.horn_state, state)
     t:add(pf.summary, string.format("Horn %s slot=%X", state, slot))
-    add_evidence(t, "rnet_utils.py:346")
+    add_evidence(t, "Code", "rnet_utils.py:346")
     return "Horn"
 end
 
@@ -3836,7 +3879,7 @@ local function decode_lights(tvb, t)
             t:add(pf.summary, "Lights mask=" .. light_names(mask) .. " (DLC=1)")
         end
     end
-    add_evidence(t, "janschu99 RNETdictionary.txt:40 (mask=byte0, bitmap=byte1; 01=L 04=R 10=Hazard 80=Flood)")
+    add_evidence(t, "Documented", "janschu99 RNETdictionary.txt:40")
     return "Lights"
 end
 
@@ -3853,7 +3896,7 @@ local function decode_serial_heartbeat(tvb, t)
         end
         t:add(pf.summary, string.format("JSM serial=%s%s", sn, net_tag))
     end
-    add_evidence(t, "rnet_utils.py:275 + parse network identification")
+    add_evidence(t, "Code", "rnet_utils.py:275 + XOR-table identification")
     return "SerHB"
 end
 
@@ -3888,7 +3931,7 @@ local function decode_auth(tvb, t, cid, is_rtr)
                     t:add(pf.summary, string.format(
                         "Auth response seq=%d slot=%X key=0x%02X val=0x%02X ✓ %s [JSM serial]",
                         seq, slot, key, value, net.name:match("^([^:]+)")))
-                    add_evidence(t, "parse XOR-table cross-check (full JSM serial match)")
+                    add_evidence(t, "Code", "XOR-table cross-check (full JSM serial match)")
                     return "Auth"
                 end
                 break
@@ -3908,7 +3951,7 @@ local function decode_auth(tvb, t, cid, is_rtr)
         t:add(pf.summary, string.format("Auth response seq=%d slot=%X key=0x%02X val=0x%02X%s",
             seq, slot, key, value, net_tag))
     end
-    add_evidence(t, "rnet_utils.py:315 + parse_auth_frame_id:128")
+    add_evidence(t, "Code", "rnet_utils.py:315 + parse_auth_frame_id:128")
     return "Auth"
 end
 
@@ -4121,7 +4164,7 @@ local function decode_pop_std(tvb, t, cid)
             slot_name(this_node), slot_name(other),
             op, reg_str, text_str, extra_str))
     end
-    add_evidence(t, "DongleInterface.dll RE (CPOPMsg class) (CPOPMsg decompile)")
+    add_evidence(t, "Code", "DongleInterface.dll CPOPMsg class (Ghidra)")
     return "POPstd"
 end
 
@@ -4142,7 +4185,7 @@ local function decode_pop_xtd(tvb, t, cid)
     t:add(pf.summary, string.format(
         "POP-ext to %s  %s  seg=%d",
         slot_name(node), tc_name(tc, true), seg))
-    add_evidence(t, "DongleInterface.dll RE (CPOPMsg class) (CPOPMsg decompile)")
+    add_evidence(t, "Code", "DongleInterface.dll CPOPMsg class (Ghidra)")
     return "POPxtd"
 end
 
@@ -4210,7 +4253,7 @@ local function decode_mode_config(tvb, t, cid)
 
     t:add(pf.summary, string.format("ModeCfg mode=%d subaddr=0x%02X type=0x%02X (%s)%s",
         mode, subaddr, typ, mode_type_names[typ] or "?", detail))
-    add_evidence(t, "cJSM display-protocol notes §Mode Configuration Frames + parse Type-0x61 field decode")
+    add_evidence(t, "Code", "cJSM display-protocol notes §Mode Configuration Frames + empirical Type-0x61 decode")
     return "ModeCfg"
 end
 
@@ -4227,7 +4270,7 @@ local function decode_tones(tvb, t)
         t:add(pf.tones, s)
         t:add(pf.summary, "Tones: " .. s)
     end
-    add_evidence(t, "rnet_utils.py:377")
+    add_evidence(t, "Code", "rnet_utils.py:377")
     return "Tone"
 end
 
@@ -4250,7 +4293,7 @@ local function decode_device_enum(tvb, t, cid)
                 slot, bytes_to_hex(tvb, 0, 8)))
         end
     end
-    add_evidence(t, "rnet_utils.py:389 + DeviceDriver.GetSN decompile")
+    add_evidence(t, "Code", "rnet_utils.py:389 + DeviceDriver.GetSN decompile")
     return "DevEnum"
 end
 
@@ -4261,34 +4304,34 @@ local function decode_std(tvb, t, cid, is_rtr)
     if cid == 0x000 then
         t:add(pf.class, is_rtr and "Sleep all devices" or "Sleep command")
         t:add(pf.summary, is_rtr and "Sleep all (RTR)" or "Sleep cmd")
-        add_evidence(t, "rnet_utils.py:271")
+        add_evidence(t, "Code", "rnet_utils.py:271")
         return "Sleep"
     elseif cid == 0x002 then
         -- [unverified] dictionary §1 (RNET_FRAME_DICTIONARY.md): "PM sleep all
         -- (alternate) / Seen during JSM init". Not in runnable decoder.
         local desc = is_rtr and "PM sleep all (alternate)" or "Seen during JSM init"
         t:add(pf.class, desc .. " [unverified]")
-        add_evidence(t, "frame_dict §1 (UNVERIFIED)")
+        add_evidence(t, "Inferred", "frame_dict §1 family-analogy")
         return "Sleep2"
     elseif cid == 0x004 then
         -- [unverified] dictionary §1
         local desc = is_rtr and "Sleep/wake sequence" or "JSM sleep commencing"
         t:add(pf.class, desc .. " [unverified]")
-        add_evidence(t, "frame_dict §1 (UNVERIFIED)")
+        add_evidence(t, "Inferred", "frame_dict §1 family-analogy")
         return "Sleep4"
     elseif cid == 0x00C then
         t:add(pf.class, "Network test")
-        add_evidence(t, "rnet_utils.py:273")
+        add_evidence(t, "Code", "rnet_utils.py:273")
         return "NetTest"
     elseif cid == 0x00E then
         return decode_serial_heartbeat(tvb, t)
     elseif cid == 0x040 then
         t:add(pf.class, "Open parameter page")
-        add_evidence(t, "rnet_utils.py:279")
+        add_evidence(t, "Code", "rnet_utils.py:279")
         return "OpenParam"
     elseif cid == 0x041 then
         t:add(pf.class, "Close parameter page")
-        add_evidence(t, "rnet_utils.py:281")
+        add_evidence(t, "Code", "rnet_utils.py:281")
         return "CloseParam"
     elseif cid == 0x050 then
         -- Per janschu99 dictionary line 10: `050#Ss0M00XX` JSMrx,
@@ -4302,7 +4345,7 @@ local function decode_std(tvb, t, cid, is_rtr)
             t:add(pf.summary, string.format(
                 "Mode map: attribute=0x%02X mode=%d data=0x%02X", ss, m, xx))
         end
-        add_evidence(t, "janschu99 RNETdictionary.txt:10 (050#Ss0M00XX same format as 060)")
+        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt:10")
         return "ModeMap"
     elseif cid == 0x060 then
         -- 0x060 has two documented uses:
@@ -4330,7 +4373,7 @@ local function decode_std(tvb, t, cid, is_rtr)
                     "JSMrx mode attribute: Ss=0x%02X mode=%d data=0x%02X", b0, m, b3))
             end
         end
-        add_evidence(t, "janschu99 RNETdictionary.txt:13 + diary:10-12 + categorized:56-57")
+        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt:13 + diary:10-12 + categorized:56-57")
         return "ModeAttr"
     elseif cid == 0x051 then
         -- Per janschu99 dictionary line 9: `051#004M0000` JSMtx select
@@ -4340,7 +4383,7 @@ local function decode_std(tvb, t, cid, is_rtr)
             local m = bit.band(tvb(1,1):uint(), 0xF)
             t:add(pf.summary, string.format("Select profile %d", m))
         end
-        add_evidence(t, "janschu99 RNETdictionary.txt:9 (051#004M0000)")
+        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt:9")
         return "SelProf"
     elseif cid == 0x061 then
         -- Per janschu99 dictionary lines 11-12:
@@ -4358,7 +4401,7 @@ local function decode_std(tvb, t, cid, is_rtr)
                 t:add(pf.summary, string.format("Mode control byte0=0x%02X mode=%d", b0, m))
             end
         end
-        add_evidence(t, "janschu99 RNETdictionary.txt:11-12 (061#404M=suspend, 061#004M=select)")
+        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt:11-12")
         return "ModeCtl"
     elseif bit.band(cid, 0x7E0) == 0x780 then
         -- POP standard-ID frame (any of 0x780..0x79F).
@@ -4369,19 +4412,19 @@ local function decode_std(tvb, t, cid, is_rtr)
         -- open-rnet UPD_HUNT_AND_POP_FINDING.md.
         t:add(pf.class, "Programmer presence")
         t:add(pf.summary, "Programmer presence announcement")
-        add_evidence(t, "frame-class glossary notes + open-rnet UPD_HUNT_AND_POP_FINDING.md")
+        add_evidence(t, "Documented", "frame-class glossary notes + UPD_HUNT_AND_POP_FINDING.md")
         return "ProgHere"
     elseif cid == 0x7B0 then
         t:add(pf.class, "Config mode 0")
-        add_evidence(t, "rnet_utils.py:303")
+        add_evidence(t, "Code", "rnet_utils.py:303")
         return "Cfg0"
     elseif cid == 0x7B1 then
         t:add(pf.class, "Config mode 1")
-        add_evidence(t, "rnet_utils.py:305")
+        add_evidence(t, "Code", "rnet_utils.py:305")
         return "Cfg1"
     elseif cid == 0x7B3 then
         t:add(pf.class, is_rtr and "Serial exchange request" or "Serial exchange")
-        add_evidence(t, "rnet_utils.py:307")
+        add_evidence(t, "Code", "rnet_utils.py:307")
         return "SerExch"
     elseif cid >= 0x040 and cid <= 0x04F then
         -- Param-page family extension. 0x040/041 documented (open/close).
@@ -4391,7 +4434,7 @@ local function decode_std(tvb, t, cid, is_rtr)
         local fn = cid - 0x040
         t:add(pf.class, string.format("Param-page family (fn 0x%X) [unverified]", fn))
         t:add(pf.summary, string.format("Param-page family, function 0x%X", fn))
-        add_evidence(t, "family-analogy to 0x040/0x041 (UNVERIFIED — see Q4e)")
+        add_evidence(t, "Inferred", "family-analogy to documented 0x040/0x041")
         return "ParamX"
     elseif cid >= 0x050 and cid <= 0x05F then
         -- Mode-map family extension. 0x050 documented as "Mode map" per
@@ -4399,7 +4442,7 @@ local function decode_std(tvb, t, cid, is_rtr)
         local fn = cid - 0x050
         t:add(pf.class, string.format("Mode-map family (fn 0x%X) [unverified]", fn))
         t:add(pf.summary, string.format("Mode-map family, function 0x%X", fn))
-        add_evidence(t, "family-analogy to 0x050 Mode map (UNVERIFIED)")
+        add_evidence(t, "Inferred", "family-analogy to documented 0x050 Mode map")
         return "ModeMapX"
     elseif cid >= 0x060 and cid <= 0x06F then
         -- Mode-family extension. 0x060 = Mode request (R3 evidenced);
@@ -4407,7 +4450,7 @@ local function decode_std(tvb, t, cid, is_rtr)
         local fn = cid - 0x060
         t:add(pf.class, string.format("Mode family (fn 0x%X) [unverified]", fn))
         t:add(pf.summary, string.format("Mode family, function 0x%X", fn))
-        add_evidence(t, "family-analogy to 0x060/0x061 (UNVERIFIED)")
+        add_evidence(t, "Inferred", "family-analogy to documented 0x060/0x061")
         return "ModeFamX"
     elseif cid >= 0x7B0 and cid <= 0x7BF then
         -- Config-mode family extension. 0x7B0/7B1/7B3 documented in
@@ -4415,7 +4458,7 @@ local function decode_std(tvb, t, cid, is_rtr)
         local fn = cid - 0x7B0
         t:add(pf.class, string.format("Config-mode family (fn 0x%X) [unverified]", fn))
         t:add(pf.summary, string.format("Config-mode family, function 0x%X", fn))
-        add_evidence(t, "family-analogy to 0x7B0/0x7B1/0x7B3 (UNVERIFIED)")
+        add_evidence(t, "Inferred", "family-analogy to documented 0x7B0/0x7B1/0x7B3")
         return "CfgFamX"
     else
         t:add(pf.class, string.format("Unknown STD 0x%03X", cid))
@@ -4445,14 +4488,14 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         local n = (cid == 0x0A400300) and 1 or 2
         t:add(pf.class, string.format("BTM Control %d", n))
         t:add(pf.summary, string.format("BTMouse Control %d", n))
-        add_evidence(t, "DongleInterface.dll wire-format notes §14.2 (DongleInterface.dll)")
+        add_evidence(t, "Code", "DongleInterface.dll wire-format notes §14.2")
         return "BTMctl"
     elseif cid == 0x0A400002 or cid == 0x0A400102 then
         -- BTMouse Status 1/2 — same family, §14.2.
         local n = (cid == 0x0A400002) and 1 or 2
         t:add(pf.class, string.format("BTM Status %d", n))
         t:add(pf.summary, string.format("BTMouse Status %d", n))
-        add_evidence(t, "DongleInterface.dll wire-format notes §14.2 (DongleInterface.dll)")
+        add_evidence(t, "Code", "DongleInterface.dll wire-format notes §14.2")
         return "BTMstat"
     elseif bit.band(cid, 0xFFFFF0F0) == 0x0C040000 then
         return decode_horn(tvb, t, cid)
@@ -4475,7 +4518,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         t:add(pf.jsm_signature, valid):set_generated()
         t:add(pf.summary, valid and "JSM heartbeat (signature 87×7 OK, 100ms periodic)"
                                 or "JSM heartbeat (UNEXPECTED PAYLOAD)")
-        add_evidence(t, "janschu99 RNETdictionary.txt:26 (03c30F0F#87×8, 100ms periodic) + parse empirical 500/500")
+        add_evidence(t, "Code", "janschu99 RNETdictionary.txt:26 + empirical 500/500 corroboration")
         return "JSMhb"
     elseif bit.band(cid, 0xFFFFF0FF) == 0x0C140000 then
         -- 0x0C14[slot]00 = module-emitted heartbeat. Originally documented
@@ -4508,7 +4551,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
                 "%s slot=%X byte0=0x%02X (TC=%d → %s)%s",
                 label, slot, b, tc, slot_name(other), phase))
         end
-        add_evidence(t, "janschu99 RNETdictionary.txt:44 (slot 0 = PM) + line 45 (slot 4 lamp-ctlr?) + parse: POP byte-0 reuse")
+        add_evidence(t, "Code", "janschu99 RNETdictionary.txt:44-45 + POP byte-0 reuse cross-check")
         return "Hb"
     elseif cid == 0x181C0D00 or cid == 0x181C0100 then
         -- Both function bytes 0x0D and 0x01 play tones. Per janschu99
@@ -4527,7 +4570,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         -- RNET_PROTOCOL_SPECIFICATION.md §1059; PROJECT_NOTES.md:479.
         t:add(pf.class, "Transfer Complete sentinel")
         t:add(pf.summary, "End-of-transfer marker (Programmer)")
-        add_evidence(t, "open_rnet_2026 extract_config_data.py:68-69 + RNET_PROTOCOL_SPECIFICATION.md §1059")
+        add_evidence(t, "Code", "extract_config_data.py:68-69 + DongleInterface.dll wire-format §1059")
         return "XferDone"
     elseif bit.band(bit.rshift(cid, 18), 0x7E0) == 0x780 then
         -- POP extended-ID frame. Rigorous membership test from
@@ -4553,7 +4596,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
                 t:add(pf.summary, string.format(
                     "Time of Day = 0x%012X (LE, 6 bytes)", v))
             end
-            add_evidence(t, "janschu99 RNETdictionary.txt §1c2c0D00 'Time of Day, little-endian'")
+            add_evidence(t, "Documented", "janschu99 RNETdictionary.txt §1c2c0D00")
             return "TOD"
         end
         t:add(pf.class, "0x1C2C telemetry (per-slot variant) [unverified]")
@@ -4567,7 +4610,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
                 fb, tvb(0,1):uint(), tvb(1,2):le_uint(),
                 tvb(3,1):uint(), tvb(4,1):uint(), tvb(5,1):uint()))
         end
-        add_evidence(t, "parse hackathon 2026-05-21 capture + external RE notes R3 (UNVERIFIED — slot variants)")
+        add_evidence(t, "Inferred", "hackathon-only observation, slot-variant hypothesis")
         return "Tlm1C2C"
     elseif bit.band(cid, 0xFFFF00FF) == 0x181C0000 then
         -- 0x181C0X00 cJSM/JSM device-class family. Function byte = X.
@@ -4584,21 +4627,21 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         else
             t:add(pf.summary, string.format("cJSM/JSM family, function 0x%02X", func))
         end
-        add_evidence(t, "parse hackathon 2026-05-21 capture + external RE notes R1 §0x181C family (UNVERIFIED — analogy)")
+        add_evidence(t, "Inferred", "hackathon-only observation, 0x181C family-analogy")
         return "cJSMx"
     elseif cid == 0x0C000005 then
         -- "PMtx global motor has stopped (0 MPH)" per janschu99 dictionary
         -- §0C000005. Zero-payload event.
         t:add(pf.class, "Motor stopped")
         t:add(pf.summary, "PMtx global: motor stopped (0 MPH)")
-        add_evidence(t, "janschu99 RNETdictionary.txt §0C000005")
+        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt §0C000005")
         return "MotStop"
     elseif cid == 0x0C000006 then
         -- "PMtx global motor is decelerating" per janschu99 dictionary
         -- §0C000006.
         t:add(pf.class, "Motor decelerating")
         t:add(pf.summary, "PMtx global: motor decelerating")
-        add_evidence(t, "janschu99 RNETdictionary.txt §0C000006")
+        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt §0C000006")
         return "MotDecel"
     elseif bit.band(cid, 0xFFFF00FF) == 0x0C000000 and tvb:len() == 2 then
         -- 0x0C00MM00 with 2-byte payload = ILM/lamp-controller (mask, bitmap)
@@ -4619,7 +4662,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
                            or string.format("action 0x%02X", action)
         t:add(pf.class, "Lamp action")
         t:add(pf.summary, "JSMtx → ILM: " .. action_name)
-        add_evidence(t, "janschu99 RNETdictionary.txt §0C0004NN (lines 36-39)")
+        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt §0C0004NN")
         return "Lamp"
     elseif bit.band(cid, 0xFFFF00F0) == 0x0C000000 and bit.band(cid, 0xF) >= 1
            and bit.band(cid, 0xF) <= 6 and bit.band(bit.rshift(cid, 8), 0xFF) >= 0x01 then
@@ -4631,7 +4674,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         t:add(pf.class, string.format("JSM UI event (module %d, sub %d) [unverified]", mm, sub))
         t:add(pf.summary, string.format(
             "JSMtx UI interaction for module %d (sub 0x%02X)", mm, sub))
-        add_evidence(t, "janschu99 RNETdictionary.txt §0C000205/0C000301 (lines 32-35)")
+        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt §0C000205/0C000301")
         return "UIEvent"
     elseif bit.band(cid, 0xFFFF0000) == 0x0C000000 then
         return decode_lights(tvb, t)
@@ -4643,7 +4686,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         t:add(pf.class, "Device state")
         t:add(pf.slot, slot)
         t:add(pf.summary, string.format("Device slot=%X %s", slot, state))
-        add_evidence(t, "rnet_utils.py:424")
+        add_evidence(t, "Code", "rnet_utils.py:424")
         return "DevState"
     elseif bit.band(cid, 0xFFFFF0F0) == 0x0C180000 then
         return decode_motor_enable(tvb, t, cid)
@@ -4670,7 +4713,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
                     "⚠ Status slot=%X code=0x%04X (undocumented)", slot, code))
             end
         end
-        add_evidence(t, "rnet_utils.py:437 + open-rnet/docs/RNET_ERROR_CODES.md (302 entries)")
+        add_evidence(t, "Code", "rnet_utils.py:437 + docs/RNET_ERROR_CODES.md (302 entries)")
         return "Status"
     elseif cid == 0x0C280000 then
         -- "PM connected" sentinel — sent once by PM after the serial-number
@@ -4681,7 +4724,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         else
             t:add(pf.summary, "PM connected (DLC=0)")
         end
-        add_evidence(t, "janschu99 RNETdictionary.txt §0C280000")
+        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt §0C280000")
         return "PMconn"
     elseif bit.band(cid, 0xFFFFF0FF) == 0x0C280000 then
         -- 0x0C280X00 per-slot variants — by analogy to slot-0 "PM connected"
@@ -4693,7 +4736,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
             t:add(pf.summary, string.format(
                 "Slot %X connected (flag=0x%02X) [unverified]", slot, tvb(0,1):uint()))
         end
-        add_evidence(t, "family-analogy to 0x0C280000 PM-connected sentinel (UNVERIFIED)")
+        add_evidence(t, "Inferred", "family-analogy to documented 0x0C280000 PM-connected")
         return "ModConn"
     elseif bit.band(cid, 0xFFFFF000) == 0x0A400000 then
         -- BTM (Bluetooth Mouse) family extension. The documented entries
@@ -4704,7 +4747,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         local sub = bit.band(cid, 0xFFFF)
         t:add(pf.class, string.format("BTM family (sub 0x%04X) [unverified]", sub))
         t:add(pf.summary, string.format("BTM family sub=0x%04X", sub))
-        add_evidence(t, "family-analogy to 0x0A400300/0102 BTM Control/Status (UNVERIFIED)")
+        add_evidence(t, "Inferred", "family-analogy to documented BTM Control/Status")
         return "BTMx"
     elseif bit.band(cid, 0xFFFFF0FF) == 0x1C200000 then
         -- Per janschu99 categorized dictionary line 52:
@@ -4723,7 +4766,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
                 t:add(pf.summary, string.format("JSM-rx 0x1C20 slot=%X payload=%s", slot, hex))
             end
         end
-        add_evidence(t, "janschu99 categorized dictionary line 52 §1C200X00")
+        add_evidence(t, "Documented", "janschu99 categorized dictionary line 52 §1C200X00")
         return "JsmRx1C20"
     elseif bit.band(cid, 0xFFFFF0FF) == 0x14300001 then
         -- DLC=1, byte 0 observed at {0, 25, 50, 100} — quartile percentages.
@@ -4738,7 +4781,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
             t:add(pf.summary, string.format(
                 "Motor scale slot=%X = %d%% [unverified]", slot, v))
         end
-        add_evidence(t, "parse hackathon 2026-05-21 capture + external RE notes R3 reply (UNVERIFIED)")
+        add_evidence(t, "Inferred", "hackathon-only observation")
         return "MotScl"
     elseif cid == 0x15000000 then
         -- 5 occurrences total in hackathon dump, DLC=4, constant payload
@@ -4746,7 +4789,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         -- reply. Likely event/announcement broadcast; precise semantics open.
         t:add(pf.class, "Event broadcast (0x15) [unverified]")
         t:add(pf.summary, "Event broadcast — semantics unknown")
-        add_evidence(t, "parse hackathon 2026-05-21 capture (NOT IN ANY CORPUS DOC)")
+        add_evidence(t, "Inferred", "hackathon-only observation, no corpus citation")
         return "Event"
     elseif bit.band(cid, 0xFFF00000) == 0x1E800000 then
         -- 0x1E8X = Programmer protocol-control sentinel namespace.
@@ -4785,7 +4828,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         end
         t:add(pf.class, label)
         t:add(pf.summary, summary)
-        add_evidence(t, "POP 0x1E8X sentinel namespace notes (structural hypothesis, unconfirmed)")
+        add_evidence(t, "Inferred", "POP 0x1E8X sentinel namespace structural hypothesis")
         return "Sentinel"
     else
         t:add(pf.class, string.format("Unknown XTD 0x%08X", cid))
