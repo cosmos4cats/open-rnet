@@ -267,6 +267,200 @@ def test_dormant_chair_listened_marker_fires(edge_pcap_dir):
     )
 
 
+# ---------------------------------------------------------------------------
+# High-value-frame clarity tests
+# ---------------------------------------------------------------------------
+# These pin the EXACT decoded output for frames where the
+# user-facing semantics matter most for a researcher reading a
+# capture: security-relevant frames (Unlock, auth), session-state
+# transitions (handshake, transfer complete), cross-frame protocols
+# (POINTER→DATA binding), and primary-source-evidenced decoders
+# (RTC, keep-awake, SlotChanged).
+#
+# Each test asserts on specific class label, summary phrasing,
+# evidence tier, and (where applicable) evidence-source citation.
+# If a future change degrades the clarity of the message for one
+# of these high-value frames, these tests fail loudly.
+#
+# Synthetic fixtures defined in make_captures.HIGH_VALUE_FRAMES.
+
+
+def _hv_fields(pcap_path, *field_names):
+    """Run tshark on a high-value-frame synthetic pcap with
+    evidence display enabled and return parsed field rows."""
+    proc = subprocess.run(
+        ["tshark", "-X", f"lua_script:{LUA}",
+         "-o", "rnet.show_evidence:TRUE",
+         "-r", str(pcap_path),
+         "-T", "fields"] + sum([["-e", f] for f in field_names], []),
+        capture_output=True, text=True, timeout=15,
+    )
+    assert proc.returncode == 0, proc.stderr
+    rows = [l.split("\t") for l in proc.stdout.splitlines() if l.strip()]
+    return rows
+
+
+def test_hv_clarity_rnet_unlock(edge_pcap_dir):
+    """The R-Net Unlock frame (CAN ID 0x08280F02, DLC=0) is the
+    literal service-mode credential. The dissector must label it
+    unambiguously as 'Unlock', explain in the summary that the
+    CAN-ID IS the credential (no crypto auth), and cite the
+    primary-source DLL function. A researcher seeing this frame
+    should immediately understand its security weight."""
+    rows = _hv_fields(
+        edge_pcap_dir["hv_rnet_unlock"],
+        "rnet.class", "rnet.summary", "rnet.confidence", "rnet.evidence",
+    )
+    assert len(rows) == 1
+    cls, summary, conf, src = rows[0]
+    assert cls == "R-Net Unlock — service-mode enable", (
+        f"unexpected class: {cls!r}"
+    )
+    assert "service mode" in summary.lower(), (
+        f"summary missing 'service mode': {summary!r}"
+    )
+    assert "credential" in summary.lower(), (
+        f"summary missing 'credential' framing: {summary!r}"
+    )
+    assert "Not crypto auth" in summary or "not crypto" in summary.lower(), (
+        f"summary should clarify this is NOT crypto auth: {summary!r}"
+    )
+    assert conf == "Code"
+    assert "SendUnlock" in src and "0x10010340" in src, (
+        f"evidence must cite SendUnlock + address: {src!r}"
+    )
+
+
+def test_hv_clarity_slotchanged(edge_pcap_dir):
+    """SlotChanged signal must label the LE u32 filekey clearly
+    and cite the chair-side handler primary source."""
+    rows = _hv_fields(
+        edge_pcap_dir["hv_slotchanged"],
+        "rnet.class", "rnet.summary", "rnet.confidence", "rnet.evidence",
+    )
+    cls, summary, conf, src = rows[0]
+    assert cls == "SlotChanged signal", cls
+    assert "filekey=0x00010001" in summary, (
+        f"summary must show decoded filekey: {summary!r}"
+    )
+    assert conf == "Code"
+    assert "CheckForSlotChanged" in src and "IsSlotChangedMsg" in src
+    # Address-correction regression: the fixed address from the audit
+    # round must be present, not the old wrong one.
+    assert "0x10001630" in src, (
+        "expected corrected IsSlotChangedMsg address 0x10001630"
+    )
+    assert "0x10001b90" not in src, (
+        "wrong-address regression: 0x10001b90 should not appear"
+    )
+
+
+def test_hv_clarity_attach_handshake_step1(edge_pcap_dir):
+    """First frame of the 4-step attach handshake. The label
+    must identify both the step number and operational meaning
+    (Programmer announce, CXTN_CAN→CXTN_RNET transition)."""
+    rows = _hv_fields(
+        edge_pcap_dir["hv_attach_step1"],
+        "rnet.class", "rnet.summary", "rnet.session_state",
+    )
+    cls, summary, sstate = rows[0]
+    assert "attach handshake step 1" in cls.lower(), cls
+    assert "Programmer announce" in cls, (
+        f"class must name the operational role: {cls!r}"
+    )
+    assert "CXTN_CAN" in summary and "CXTN_RNET" in summary, (
+        f"summary must show the session-state transition: {summary!r}"
+    )
+
+
+def test_hv_clarity_transfer_complete_sentinel(edge_pcap_dir):
+    """Transfer Complete sentinel — must clearly mark the
+    return from CXTN_UPLOAD/DOWNLOAD to CXTN_RNET so a reader
+    can spot end-of-transfer in long captures."""
+    rows = _hv_fields(
+        edge_pcap_dir["hv_transfer_complete"],
+        "rnet.class", "rnet.summary",
+    )
+    cls, summary = rows[0]
+    assert "Transfer Complete" in cls, cls
+    assert "CXTN_UPLOAD/DOWNLOAD" in cls and "CXTN_RNET" in cls, (
+        f"class must show both states of the transition: {cls!r}"
+    )
+    assert "transfer complete" in summary.lower(), summary
+
+
+def test_hv_clarity_auth_table_b_match(edge_pcap_dir):
+    """Auth response that matches a known XOR network table.
+    The dissector must surface the network identity with a
+    ✓ glyph for quick visual scan, name the table (e.g.
+    'Table B'), and populate the rnet.auth.network field for
+    filtering. This is the strongest network-attribution signal
+    the dissector has."""
+    rows = _hv_fields(
+        edge_pcap_dir["hv_auth_response_table_b"],
+        "rnet.class", "rnet.summary", "rnet.confidence",
+        "rnet.evidence", "rnet.auth.network",
+    )
+    cls, summary, conf, src, net = rows[0]
+    assert cls == "Serial auth — response", cls
+    assert "✓" in summary, (
+        f"summary must include ✓ glyph for visual scan: {summary!r}"
+    )
+    assert "Table B" in summary, (
+        f"summary must name the matched table: {summary!r}"
+    )
+    assert "matches known JSM serial" in summary
+    assert conf == "Code"
+    assert "XOR-table cross-check" in src
+    assert net.startswith("Table B"), (
+        f"rnet.auth.network must be populated for filtering: {net!r}"
+    )
+
+
+def test_hv_clarity_keep_awake_heartbeat(edge_pcap_dir):
+    """Programmer-active keep-awake heartbeat — must clearly
+    state its rate-limiting behavior and chair-sleep-prevention
+    purpose. Primary-source evidenced from CFTDIInterface::
+    ResetSleepTimer."""
+    rows = _hv_fields(
+        edge_pcap_dir["hv_keep_awake"],
+        "rnet.class", "rnet.summary", "rnet.confidence", "rnet.evidence",
+    )
+    cls, summary, conf, src = rows[0]
+    assert "keep-awake" in cls.lower(), cls
+    assert "Programmer" in cls
+    assert "prevents chair sleep" in summary.lower() \
+        or "prevents chair" in summary.lower(), (
+        f"summary must state the chair-sleep-prevention purpose: {summary!r}"
+    )
+    assert conf == "Code"
+    assert "ResetSleepTimer" in src and "0x100053e0" in src
+
+
+def test_hv_clarity_rtc_broadcast_decoded(edge_pcap_dir):
+    """RTC broadcast must produce a human-readable wall-clock
+    string in the summary so a researcher can correlate frame
+    timestamps to chair-side time without bit-twiddling."""
+    rows = _hv_fields(
+        edge_pcap_dir["hv_rtc_broadcast"],
+        "rnet.class", "rnet.summary", "rnet.confidence", "rnet.evidence",
+    )
+    cls, summary, conf, src = rows[0]
+    assert "RTC" in cls, cls
+    # Synthetic frame encodes 2026-05-24 14:30:45 Sunday
+    assert "2026-05-24" in summary, (
+        f"summary must contain decoded date: {summary!r}"
+    )
+    assert "14:30:45" in summary, (
+        f"summary must contain decoded time: {summary!r}"
+    )
+    assert "Sun" in summary, (
+        f"summary must contain decoded day-of-week: {summary!r}"
+    )
+    assert conf == "Code"
+    assert "DecodeRTCBroadcast" in src and "0x1000f8e0" in src
+
+
 def test_synthetic_pcap_writer_self_check():
     """Sanity: the pcap writer itself should produce files tshark can
     parse as CAN. If this test fails, the synthetic-frame tests above

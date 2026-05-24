@@ -85,6 +85,71 @@ def write_pcap(path, frames):
 # Each entry: {label: list-of-frames}. Test code asserts the dissector
 # handles each without crashing AND produces a sensible class label.
 
+# --- HIGH-VALUE-FRAME CLARITY FIXTURES ---------------------------------
+# These are NOT edge cases — they're CANONICAL examples of frames where
+# the per-frame decoded output really matters for a researcher reading
+# a capture. Each one has a paired clarity test (test_clarity_*) that
+# asserts on the EXACT output text, so any future change that degrades
+# the user-facing semantics gets caught immediately.
+#
+# Scope criterion: a frame is "high-value" if a researcher seeing it
+# in their capture needs to immediately understand (a) what it is at
+# the protocol level, (b) what it implies operationally, (c) where
+# the evidence comes from. Includes security-relevant frames (Unlock,
+# auth), session-state transitions (handshake, transfer complete),
+# and cross-frame protocols (POINTER→DATA binding).
+
+HIGH_VALUE_FRAMES = {
+    # 1. R-Net Unlock — service-mode credential. THE single highest-
+    #    value frame to decode clearly: the CAN ID itself IS the
+    #    credential; chair gates destructive operations on receipt.
+    "hv_rnet_unlock": [
+        {"id": 0x08280F02, "data": b"", "extended": True},
+    ],
+    # 2. SlotChanged signal with a representative filekey from corpus.
+    "hv_slotchanged": [
+        {"id": 0x15000000, "data": bytes.fromhex("01 00 01 00"),
+         "extended": True},
+    ],
+    # 3. Attach handshake step 1 (chair-side: Programmer announce).
+    #    First frame of the CXTN_CAN → CXTN_RNET transition.
+    "hv_attach_step1": [
+        {"id": 0x1E840000, "data": b"", "extended": True},
+    ],
+    # 4. Transfer Complete sentinel addressed to slot 15 (Programmer).
+    #    Marks return from CXTN_UPLOAD/DOWNLOAD to CXTN_RNET.
+    "hv_transfer_complete": [
+        {"id": 0x1E80000F, "data": b"", "extended": True},
+    ],
+    # 5. Auth response matching the known M300 xor_table B network.
+    #    Verifies the network-identification path surfaces "✓ Table B"
+    #    clearly. Per parse's xor_tables B entry: keys[0]=0xD3,
+    #    serial[0]=0x50. The CAN ID encoding is
+    #    0x1F<seq:4><slot:4><key:8><value:8>:
+    #      seq=0, slot=0, key=0xD3, value=0x50 → 0x1F00D350.
+    "hv_auth_response_table_b": [
+        {"id": 0x1F00D350, "data": b"", "extended": True},
+    ],
+    # 6. Programmer-active keep-awake heartbeat — primary-source
+    #    evidenced (ResetSleepTimer @ 0x100053e0). Verifies the
+    #    "Programmer-active" framing is clear.
+    "hv_keep_awake": [
+        {"id": 0x1C240F01, "data": b"", "extended": True},
+    ],
+    # 7. RTC broadcast with a fully-populated wall clock. Bit-packed
+    #    fields decoded per DecodeRTCBroadcast @ 0x1000f8e0.
+    #    Payload: 2026-05-24 14:30:45 (Sunday).
+    #    sec=45 (0x2D), min=30 (0x1E), hour=14 (0x0E),
+    #    day=24 (0x18), dow=7 (Sun, 0xE0 in high 3 bits of byte 3
+    #    = 7<<5 = 0xE0; OR with day = 0xE0|0x18 = 0xF8),
+    #    month=5 (0x05), year=26 (0x1A).
+    "hv_rtc_broadcast": [
+        {"id": 0x1C2C0D00,
+         "data": bytes([0x2D, 0x1E, 0x0E, 0xF8, 0x05, 0x1A]),
+         "extended": True},
+    ],
+}
+
 EDGE_CASES = {
     # POP std frame with DLC=0 (truncated payload). Real captures have
     # DLC=8 for POP — what does the dissector do with nothing?
@@ -192,15 +257,16 @@ EDGE_CASES = {
 
 
 def write_all(out_dir):
-    """Write one pcap per EDGE_CASES entry into out_dir; return mapping
-    {label: path}."""
+    """Write one pcap per EDGE_CASES + HIGH_VALUE_FRAMES entry into
+    out_dir; return mapping {label: path}."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     result = {}
-    for label, frames in EDGE_CASES.items():
-        p = out_dir / f"{label}.pcap"
-        write_pcap(p, frames)
-        result[label] = p
+    for catalog in (EDGE_CASES, HIGH_VALUE_FRAMES):
+        for label, frames in catalog.items():
+            p = out_dir / f"{label}.pcap"
+            write_pcap(p, frames)
+            result[label] = p
     return result
 
 
