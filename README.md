@@ -51,6 +51,7 @@ anyone can send us.
 - [Quick start (no install)](#quick-start-no-install)
 - [Installation](#installation)
 - [Usage](#usage) — basic filters, `rnet-dump`, Info column, capture formats
+- [CAN, briefly — what you need to know to read R-Net captures](#can-briefly--what-you-need-to-know-to-read-r-net-captures)
 - [Evidence policy](#evidence-policy) — Code / Documented / Inferred tiers
 - [R-Net, ReBus, POP — three names, three different things](#r-net-rebus-pop--three-names-three-different-things)
 - [POP frames — the structural decode](#pop-frames--the-structural-decode)
@@ -222,6 +223,165 @@ The dissector hooks the SocketCAN encapsulation, so it works on:
   produced by `candump -L`). Wireshark parses these natively; the
   dissector picks them up without any adaptation.
 
+## CAN, briefly — what you need to know to read R-Net captures
+
+R-Net runs on CAN (Controller Area Network), the same in-vehicle bus
+that powers cars, industrial machinery, and a lot of robotics. You
+don't need to understand CAN deeply to use this dissector — but a few
+specific CAN facts dramatically change how you read R-Net captures.
+This section is the minimum.
+
+### The core idea: CAN frames have no source or destination address
+
+A CAN frame is just a numeric **ID** (the "arbitration ID") plus up to
+8 bytes of data. There is no "from this node, to that node" — every
+node sees every frame, and each one decides whether it cares based on
+the ID. In practice the ID does triple duty:
+
+- **Priority** (lower numeric ID wins bus arbitration when two nodes
+  transmit simultaneously)
+- **Topic** (a frame ID like `0x002` means "this is a sleep signal")
+- **Routing key** (the ID encodes who's *meant* to handle it, even
+  though it's broadcast to everyone)
+
+R-Net leans into this hard. Almost everything you need to understand
+about why R-Net structures its CAN IDs the way it does flows from
+those three roles.
+
+### 11-bit vs 29-bit IDs — R-Net's priority taxonomy
+
+CAN has two ID formats: **11-bit standard** (`0x000-0x7FF`, 2048 IDs)
+and **29-bit extended** (over 500 million IDs). Standard IDs are
+shorter, so they take less bandwidth AND win arbitration over extended
+IDs of similar numeric value. R-Net uses this as a deliberate priority
+scheme:
+
+| Range | Use |
+|---|---|
+| STD `0x000` | **Sleep command** — wins everything, can be sent during any traffic to put the bus to sleep |
+| STD `0x002-0x00E` | Sleep variants, joystick init signals, network test, serial heartbeats — high-priority lifecycle traffic |
+| STD `0x040-0x07F` | Parameter pages, mode/profile changes — user actions that need fast response |
+| STD `0x780-0x79F` | POP standard requests/responses — Programmer↔chair config protocol |
+| STD `0x7B0-0x7BF` | Config-mode signals, serial exchange — Programmer session control |
+| XTD `0x02000000` | Joystick position broadcasts (high cadence, but moved out of STD because the namespace is full) |
+| XTD `0x0A4000XX` | BT-Mouse Control/Status |
+| XTD `0x0C000000`+ | Per-slot device telemetry (battery, motor, lamp, motion state) |
+| XTD `0x140C0000` | Status / error codes (302 known codes) |
+| XTD `0x14300000` | Motor current/power per slot |
+| XTD `0x1C0C0000` | Battery level per slot |
+| XTD `0x1C2C0X00` | Real-Time Clock broadcast (bit-packed date/time) |
+| XTD `0x1E000000`+ | POP extended (ReBus data transfers, multi-frame segments) |
+| XTD `0x1E80000F` | Transfer Complete sentinel (R-Net `CXTN_UPLOAD/DOWNLOAD → CXTN_RNET`) |
+| XTD `0x1E84-0x1E87` | R-Net attach handshake (4-step `CXTN_CAN → CXTN_RNET`) |
+| XTD `0x1F000000`-`0x1FFFFFFF` | XOR-based serial-auth challenges and responses |
+
+Once you see the pattern: **STD = "you need to react now"**, **XTD =
+"this is data or a longer-running protocol."** Joystick position is
+the one exception in the other direction (XTD despite high cadence) —
+it was probably moved out of STD because the STD namespace was
+already full of higher-priority module traffic.
+
+### The hardware-filter trick: Device-Type-ID in the high bits
+
+CAN has no addressing, so R-Net builds addressing into the ID itself.
+Per the LEDJSM HCS12 firmware's `MSCAN_RX_ISR @ 0x449C` plate comment,
+the 29-bit extended ID encodes a **target Device-Type-ID** in its high
+bits plus the protocol opcode in the rest. Known Device-Type-IDs:
+
+| Device-Type-ID | Module |
+|---|---|
+| `0x0000` | BT-Mouse (Bluetooth phone-control receiver) |
+| `0x6380` | LEDJSM (LED joystick module) |
+
+Each module's MSCAN hardware filter (`CANIDAR0-7`/`CANIDMR0-7`
+registers) rejects non-matching frames **in silicon, before the CPU
+sees them**. The exact bit-field layout that selects each
+Device-Type-ID is still TBD — the dispatch lives in a banked HCS12
+region (physical `0x3A9010`) that current Ghidra HCS12 banking can't
+reach properly — but the consequence is what matters here:
+
+> **A per-module firmware byte-search for a frame ID will return zero
+> if that frame isn't addressed to that module — even if the frame is
+> on the wire and the module sees it physically.**
+
+This is the most common source of "I can't find this anywhere"
+confusion when cross-validating decodes. If a frame is meant for the
+PM and you search the LEDJSM dump for its ID, you'll find nothing.
+That's correct behavior, not a missing decode.
+
+### DLC, RTR, and 125 kbit/s — the constraints that matter
+
+- **DLC (Data Length Code, 0-8)** is the payload byte count. R-Net
+  uses DLC as a sub-function selector in some families: `XTD
+  0x14300X00` (DLC=2, motor power LE u16) and `XTD 0x14300X01`
+  (DLC=1, motor state byte) are *different sub-functions* of the
+  motor-telemetry family despite the near-identical IDs. When you see
+  two frames at very similar IDs with different DLCs, expect different
+  payload semantics.
+
+- **RTR (Remote Transmission Request)** is a 1-bit flag that flips a
+  frame from "here is data" to "send me data of this type." R-Net
+  uses RTR as a *challenge trigger* — `STD 0x7B3 RTR` is a
+  serial-exchange request, the non-RTR `0x7B3` that follows is the
+  response. `STD 0x000 RTR` is "sleep all devices" vs `STD 0x000`
+  (non-RTR) which is "sleep command." The dissector surfaces this
+  via the `is_rtr` distinction in its labels.
+
+- **125 kbit/s** is R-Net's bus rate (slower than the more common
+  500 kbit/s automotive or 1 Mbit/s industrial CAN). After framing
+  overhead this caps the bus at roughly 6,000-8,000 frames/second
+  total. Periodic telemetry like RTC (~1 Hz) and motor intensity
+  gauge frames are dimensioned against this budget. If you see a
+  capture where one signal dominates the bandwidth, the chair will
+  feel laggy.
+
+### How CAN frames reach the dissector — SocketCAN, pcapng, candump
+
+CAN captures don't have a "TCP" or "UDP" layer to wrap them. The
+de-facto encapsulation in Linux is **SocketCAN**, a small per-frame
+header that bundles the CAN ID, DLC, and a few flag bits into the
+pcap payload. The dissector hooks into the SocketCAN dissector via
+heuristic registration:
+
+```lua
+rnet:register_heuristic("can", function(tvb, pinfo, tree) ... end)
+```
+
+The heuristic **always claims the frame** (`return true`). There is no
+bit-level signature for "this is R-Net" — proprietary CAN payloads
+look identical at the framing layer. The expectation is that you load
+this dissector against captures you already know are R-Net. (For
+non-R-Net traffic, every frame gets the honest label "Unknown STD
+0xXXX" or "Unknown XTD 0xXXXXXXXX" — see the
+`tests/test_dissector.py::test_non_rnet_log_produces_no_specific_decodes`
+regression that uses a non-R-Net candump as a negative control.)
+
+Two on-disk formats work out of the box:
+
+- **pcap / pcapng** with SocketCAN linktype 227 — produced by Wireshark
+  live capture on `can0`, by `tcpdump -i can0 -w`, by `dumpcap`, etc.
+- **candump `-L` text logs** — the `(unix-timestamp) iface ID#hexdata`
+  format. Wireshark 1.12+ parses these natively as if they were
+  SocketCAN pcaps.
+
+Both behave identically from the dissector's standpoint.
+
+### Why this matters for reading R-Net
+
+Once you internalize the CAN basics:
+
+- The namespace ranges stop looking random; you can predict whether
+  a new ID you've never seen is "module telemetry" or "Programmer
+  protocol" or "session sentinel" from its prefix alone.
+- The hardware-filter trick means **a missing reference isn't a
+  missing decode** — it's often correct module-targeting.
+- The 11-bit vs 29-bit choice tells you R-Net's intended priority for
+  that traffic, which in turn tells you what it competes with on a
+  busy bus.
+- The `[unverified]` family-extension labels in this dissector exist
+  because each chair module decides its own payload semantics from
+  CAN's standpoint — the bus just delivers bytes.
+
 ## Evidence policy
 
 R-Net's protocol has been reverse-engineered across several distinct
@@ -316,12 +476,12 @@ alongside the source citation when you want to verify a claim.
 
 #### Current distribution (as of 2026-05-24, post-audit)
 
-Across 56 evidence-tagged decode rules in the dissector:
+Across 57 evidence-tagged decode rules in the dissector:
 
 | Kind        | Count | %    |
 |-------------|------:|-----:|
-| Code        |    11 | 20%  |
-| Documented  |    37 | 66%  |
+| Code        |    13 | 23%  |
+| Documented  |    36 | 63%  |
 | Inferred    |     8 | 14%  |
 
 (Distribution shifted significantly on 2026-05-24 after a primary-source

@@ -827,7 +827,19 @@ local function decode_lights(tvb, t)
 end
 
 local function decode_serial_heartbeat(tvb, t)
-    t:add(pf.class, "JSM serial heartbeat")
+    -- STD 0x00E periodic 8-byte broadcast. Bytes 0-3 = JSM serial
+    -- (varies by JSM identity); bytes 4-7 = reserved/extra-state
+    -- (observed all-zero across 54,578/54,586 corpus frames).
+    --
+    -- Chair-side primary source: BTMouse MC9S12X firmware change-
+    -- detection handler @ 0x854C reads MSCAN RxFG DSR0-DSR7 (0x164-
+    -- 0x16B) and byte-compares against a saved 8-byte copy at
+    -- 0xFF3A0-0xFF3A7; on any difference it sets change-flag
+    -- DAT_0ff39c=1 and posts event ID 3 to the BTMouse event queue.
+    -- So the chair treats this frame as a periodic state vector,
+    -- not a one-shot heartbeat — bytes 4-7 are functionally
+    -- monitored even though they're empirically zero in our corpus.
+    t:add(pf.class, "JSM serial heartbeat / periodic state vector")
     if tvb:len() >= 4 then
         t:add(pf.serial_bytes, tvb(0, math.min(8, tvb:len())))
         local sn = bytes_to_hex(tvb, 0, math.min(4, tvb:len()))
@@ -842,7 +854,8 @@ local function decode_serial_heartbeat(tvb, t)
             t:add(pf.summary, string.format("JSM serial=%s", sn))
         end
     end
-    add_evidence(t, "Documented", "rnet_utils.py:275 (open-rnet community RE)")
+    add_evidence(t, "Code",
+        "BTMouse MC9S12X firmware: periodic state vector tracked by change-detect handler @ FW 0x854C (BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §7); supplementary: rnet_utils.py:275 (open-rnet community RE)")
     return "SerHB"
 end
 
@@ -1539,28 +1552,44 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
             t:add(pf.class, string.format("Mode change family (fn 0x%X)", fn))
             t:add(pf.summary, string.format("Mode change family, function 0x%X (payload semantic chair-side, no dealer decoder)", fn))
             add_evidence(t, "Code",
-                "DongleInterface.dll IsModeChangeMsg @ 0x100015e0 (classifier only; no in-DLL callers, no DLR EXE refs)")
+                "DongleInterface.dll IsModeChangeMsg @ 0x100015e0 (classifier only; no in-DLL callers, no DLR EXE refs); independently confirmed by BTMouse MC9S12X acceptance-filter table entry 0x0060 @ FW 0x56F2 (BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §5)")
         end
         return "ModeChg"
     elseif cid >= 0x7B0 and cid <= 0x7BF then
         -- Config-mode family. 0x7B0/7B1/7B3 documented in rnet_utils.py.
         -- The whole 0x7B0-0x7BF range is now chair-side EVIDENCED: it
         -- appears in the BTMouse MC9S12X MSCAN acceptance-filter table
-        -- at firmware addresses 0x56F2-0x5716 (16-bit BE words; low 12
-        -- bits = standard CAN ID, high nibble = filter-bank flag).
-        -- The filter explicitly lists 0x7B0 (flag 0x4), 0x7B1, 0x7B2,
-        -- 0x7B3, 0x7B6, and 0x7B0 again with flag 0x8 — i.e. BTMouse
-        -- RECEIVES this family from the bus. Emitter still unidentified
-        -- (FTDI dongle firmware is the most likely candidate; not in
-        -- v5/v6 DLL ServiceCANMsg dispatch as a literal). Wider 0x7Bx
-        -- range (7B7/7B8/7B9/7BB-7BF) appears in BTMouse firmware
-        -- string-search (124 hits) but isn't observed in the corpus.
+        -- at firmware addresses 0x56F2-0x5718 (18 entries, 16-bit BE
+        -- words; low 12 bits = standard CAN ID, high nibble = filter-
+        -- bank flag 0x0/0x4/0x8/0xC). The filter explicitly lists
+        -- 0x47B0/47B1/47B2/47B3/47B6 (flag 0x4) and 0x87B0 (flag 0x8)
+        -- — i.e. BTMouse RECEIVES this family from the bus. Emitter
+        -- still unidentified (FTDI dongle firmware is the most likely
+        -- candidate; not in v5/v6 DLL ServiceCANMsg dispatch as a
+        -- literal). Wider 0x7Bx range (7B7-7BF) appears in BTMouse
+        -- firmware string-search (124 hits) but isn't observed in the
+        -- corpus.
         local fn = cid - 0x7B0
         t:add(pf.class, string.format("Config-mode family (fn 0x%X)", fn))
         t:add(pf.summary, string.format("Config-mode family, function 0x%X (BTMouse-listened; emitter unidentified)", fn))
         add_evidence(t, "Code",
-            "BTMouse MC9S12X acceptance-filter table @ FW 0x56F2-0x5716 (chair-side primary source)")
+            "BTMouse MC9S12X MSCAN acceptance-filter table @ FW 0x56F2-0x5718 (BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §5; chair-side primary source)")
         return "CfgFam"
+    elseif cid == 0x7FA then
+        -- BTMouse-specific sentinel. Listed in BTMouse CAN-ID literal
+        -- table at FW 0x56E0 (entry 0, value 0x07FA) per
+        -- BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §4. INFERRED to map
+        -- to type-0 dispatch entry 3 (field1=0xA, DLC=0) which posts
+        -- event ID 1 to the BTMouse event queue. Semantic of "what
+        -- event 1 means" is not yet decoded (would need page-0x38
+        -- banked handlers). Zero corpus observations as of 2026-05-24
+        -- — forward-compat decoder so future captures get a meaningful
+        -- label.
+        t:add(pf.class, "BTMouse sentinel (0x7FA)")
+        t:add(pf.summary, "BTMouse-listened sentinel (chair posts internal event 1; semantic TBD)")
+        add_evidence(t, "Code",
+            "BTMouse MC9S12X CAN-ID literal table @ FW 0x56E0 entry 0 (BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §4)")
+        return "BTMSent"
     else
         t:add(pf.class, string.format("Unknown STD 0x%03X", cid))
         return nil
