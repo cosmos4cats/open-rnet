@@ -224,20 +224,37 @@ The dissector hooks the SocketCAN encapsulation, so it works on:
 
 ## Evidence policy
 
-R-Net's protocol has been reverse-engineered in three streams:
+R-Net's protocol has been reverse-engineered across several distinct
+streams. They are NOT equally authoritative:
 
-1. **Runnable decoder code** — `tools/rnet_utils.py` and
-   `lib/can2RNET.py` in this repo — used live against real captures.
-2. **Prose dictionary** — `reference/RNET_FRAME_DICTIONARY.md`
-   in this repo and related notes — mix of primary research and inference.
-3. **DLL symbol dumps + wire-format facts** recovered from later research
-   into the Programmer dongle DLL (`DongleInterface.dll`) and the
-   `IRConfigurator.exe` companion app. The names and structures cited
-   are facts about the wire protocol; consult the citations in the
-   dissector for specific evidence sources.
+1. **Primary-source firmware decompiles** (most authoritative): direct
+   Ghidra/ilspycmd decompiles of vendor binaries — `DongleInterface.dll`
+   (v5/v6), `RNet Programmer6 DLR.exe`, `IRConfigurator.exe` (.NET),
+   `LEDJSM` HCS12 firmware, `BTMouse` MC9S12X firmware. These tell us
+   what the vendor's own code actually does. This work lives in a
+   private follow-up tree and is referenced here as `DongleInterface.dll
+   FuncName @ 0xNNNN` citations.
 
-This dissector takes (1) as its spine for general control frames and
-(3) as its spine for the POP (Parameter Object Protocol) wire format.
+2. **Community reverse-engineering**: the open-rnet repo itself —
+   `tools/rnet_utils.py`, `analysis/protocol/extract_config_data.py`,
+   `docs/RNET_PROTOCOL_SPECIFICATION.md`, `docs/RNET_ERROR_CODES.md`,
+   etc. These have been independently observed-to-work against real
+   captures but are themselves derivative RE, not primary. **They
+   contain known errors** — for example, primary-source RE has shown
+   that open-rnet's BTMouse MCU identification (claimed HCS08, actually
+   MC9S12X), its 96.8% BTMouse/LEDJSM similarity claim (actual ≈33%),
+   and its BTMouse 0x0160 "encryption key" interpretation (actually a
+   Bluetooth link key, per open-rnet's own later assessment) are
+   wrong. Treat open-rnet as a useful starting hypothesis, not a fact.
+
+3. **Community dictionaries and prose**: janschu99 `RNETdictionary.txt`,
+   `RNETcanframe_diary.txt`, `RNET_FRAME_DICTIONARY.md`. Careful
+   observational work but never authoritative on its own.
+
+4. **Wire captures + parse cross-corpus pattern analysis**: empirical
+   facts about what frames appear, with what payloads, in what
+   sequences — primary in a different sense (the wire data is
+   ground truth) but interpretation can be wrong.
 
 ### Evidence-kind labels
 
@@ -248,27 +265,33 @@ alongside the source citation when you want to verify a claim.
 
 #### The three labels
 
-- **`Code`** — derived from primary, verifiable sources:
-  - Runnable decoder code in this repo (`rnet_utils.py`, `JoyLocal.py`)
-    that has been used live against real captures
-  - Ghidra decompile of the DLL artifact that actually drives the
-    protocol (`DongleInterface.dll`, `IRConfigurator.exe`)
-  - Empirical cross-validation across many captured frames
-    (XOR-table match against a known network, 500/500 fingerprint
-    match against a known constant payload)
+- **`Code`** — derived from primary-source firmware decompile. Specifically:
+  - Ghidra/ilspycmd decompile of a vendor binary (DongleInterface.dll,
+    DLR EXE, IRConfigurator.exe, LEDJSM/BTMouse firmware) with the
+    cited function name + address, OR
+  - Empirical cross-validation against the wire data itself
+    (XOR-table match against a known network, BTMouse acceptance-filter
+    table at a specific firmware offset).
 
-  You can verify these by reading the cited code or re-running the
-  empirical check. Treat as trustworthy.
+  Note: a previous version of this dissector treated `rnet_utils.py`
+  and open-rnet docs as `Code` because they're "runnable code." Per
+  cross-source audit (2026-05-24), open-rnet is community-derivative
+  RE, not primary, so those citations have been re-tiered to
+  `Documented`.
 
-- **`Documented`** — derived from a single documented source without
-  independent cross-corroboration:
-  - Community dictionary entries (janschu99's `RNETdictionary.txt` /
-    `RNETcanframe_diary.txt` / categorized dictionary)
-  - A single Ghidra finding noted in research notes
+- **`Documented`** — derived from a community-RE source. Trustworthy
+  starting point but not authoritative:
+  - open-rnet decoders (`rnet_utils.py`, `extract_config_data.py`,
+    `parse_auth_frame_id`) and specs (`RNET_PROTOCOL_SPECIFICATION.md`,
+    `RNET_ERROR_CODES.md`, `RNET_FRAME_DICTIONARY.md`)
+  - Community dictionaries (janschu99's `RNETdictionary.txt`,
+    `RNETcanframe_diary.txt`, categorized variant)
+  - parse's own per-Type empirical decode (e.g., `decode_mode_config`)
+    where no primary-source decoder exists
 
-  Trustworthy author, careful research, but no second voice has
-  confirmed. Treat as likely-correct; verify if your application
-  depends on it.
+  Treat as likely-correct; verify if your application depends on it.
+  In several cases (noted above and at the cited line in the dissector)
+  open-rnet has been confirmed-wrong by primary-source RE.
 
 - **`Inferred`** — no direct source backs the decode; the rule
   exists because of one of:
@@ -282,18 +305,30 @@ alongside the source citation when you want to verify a claim.
   - Hackathon-only observations not yet matched against another
     source
 
+  Inferred decodes commonly carry a `chair-emitted confirmed by
+  N-source dealer-side zero-hit sweep` note in their evidence source
+  — that's a negative-finding confirmation of *direction* (which
+  module emits the frame), not of the *semantic* (what the payload
+  bytes mean).
+
   Treat as a hint, not a fact. Useful for getting some signal out of
   otherwise-unknown frames; not a basis for safety-critical code.
 
-#### Current distribution (as of 2026-05-23)
+#### Current distribution (as of 2026-05-24, post-audit)
 
 Across 56 evidence-tagged decode rules in the dissector:
 
 | Kind        | Count | %    |
 |-------------|------:|-----:|
-| Code        |    33 | 59%  |
-| Documented  |    14 | 25%  |
-| Inferred    |     9 | 16%  |
+| Code        |    11 | 20%  |
+| Documented  |    37 | 66%  |
+| Inferred    |     8 | 14%  |
+
+(Distribution shifted significantly on 2026-05-24 after a primary-source
+audit reclassified open-rnet-citing rules from `Code` to `Documented`.
+See "Evidence policy" above. The dissector's decode coverage is
+unchanged — what changed is the honest accounting of which decodes
+rest on primary firmware decompiles versus community RE.)
 
 These percentages move as research progresses — `Inferred` entries
 tend to become `Documented` or `Code` over time when a wire capture
@@ -490,9 +525,10 @@ primary truth.
 | BTM Control 1/2                  | XTD `0x0A400300/01`             | `DongleInterface.dll wire-format notes §14.2` |
 | BTM Status 1/2                   | XTD `0x0A400002/0102`           | same |
 | Transfer Complete sentinel       | XTD `0x1E80000F` (DLC=0)        | `extract_config_data.py:68-69` + `RNET_PROTOCOL_SPECIFICATION.md §1059` |
-| SlotChanged signal (LE u32 filekey) | XTD `0x15000000`             | `DongleInterface.dll v5 CheckForSlotChanged @ 0x10008b00` + `IsSlotChangedMsg @ 0x10001b90` |
-| Profile change family            | STD `0x050-0x05F`               | `DongleInterface.dll IsProfileChangeMsg @ 0x10001b50` (StdIDMatches(0x50)) |
-| Mode change family (data[0]≠0x90)| STD `0x060-0x06F`               | `DongleInterface.dll IsModeChangeMsg @ 0x10001b00` (StdIDMatches(0x60) + data[0] guard) |
+| SlotChanged signal (LE u32 filekey) | XTD `0x15000000`             | `DongleInterface.dll v5 CheckForSlotChanged @ 0x10008b00` + `IsSlotChangedMsg @ 0x10001630` |
+| Profile change family            | STD `0x050-0x05F`               | `DongleInterface.dll IsProfileChangeMsg @ 0x10001610` (StdIDMatches(0x50)) |
+| Mode change family (data[0]≠0x90)| STD `0x060-0x06F`               | `DongleInterface.dll IsModeChangeMsg @ 0x100015e0` (StdIDMatches(0x60) + data[0] guard) |
+| Config-mode family               | STD `0x7B0-0x7BF`               | BTMouse MC9S12X acceptance-filter table @ FW `0x56F2-0x5716` (chair-side primary source) |
 | CRC flag (bit 4 of POP byte 0)   | per-frame                       | `CPOPMsg::CRC_BIT` + `GetCRCFlag()` (DongleInterface.dll symbol dump) |
 | Status / error code (BE u16)     | XTD `0x140C0X0Y` payload [0..1] | `docs/RNET_ERROR_CODES.md` (302 entries) + `.rnd error-catalog extraction` v2 (810+ entries with `confidence` field) |
 | Mode request (JSM→PM)            | STD `0x060`                     | `open-rnet RNET_PROTOCOL_SPECIFICATION.md:1036` |
@@ -510,7 +546,6 @@ primary truth.
 | Sleep variants | STD `0x002`, `0x004` | `RNET_FRAME_DICTIONARY.md §1` |
 | Param-page family | STD `0x042-0x04F` | analogy to documented `0x040/0x041`; chair-emitted confirmed by 4-source DLL/EXE/HCS12 zero-hit sweep |
 | `0x06X data[0]=0x90` sibling family | STD `0x060-0x06F` payloads starting `90` | DLL `IsModeChangeMsg` excludes data[0]=0x90 as a different family; handler not yet traced |
-| Config-mode family | STD `0x7B2/7B4-0x7BF` | analogy to documented `0x7B0/7B1/7B3` |
 | Per-slot motor state byte | XTD `0x14300X01` | discrete states across 12+ captures; `0x1B` likely magic constant (not 27%); PM HCS12 not dumped |
 | 0x1C2C per-slot telemetry (functions ≠ 0x0D) | XTD `0x1C2C0X00` | parse pattern + dictionary TOD hint |
 | cJSM/JSM family (functions ≠ 0x0D/0x01) | XTD `0x181C0X00` | parse pattern + external RE family hint |
@@ -1030,9 +1065,8 @@ for future RE work:
 | STD `0x05X` (051-054) | 208 | Profile-change family member — family ID confirmed via DLL `IsProfileChangeMsg`, per-payload semantic still open |
 | STD `0x06X` (060-065) | 291 | Mode-change family member — family ID confirmed via DLL `IsModeChangeMsg`, per-payload semantic still open |
 | STD `0x04X` (042-045) | 94 | Param-page family — direction (chair-emitted) confirmed via 4-source dealer-side zero-hit sweep, semantic still open |
-| STD `0x7BX` (7B2, 7B6) | 52 | Cluster near config-mode `0x7B0/7B1` |
 | XTD `0x181C0X00` (X≠D) | ~91 | Family prefix matches tones (`0x181C0D00`); cJSM-emitted confirmed by 4-source zero-hit sweep; cJSM firmware not yet dumped |
-| XTD `0x0A400X0Y` (other slots) | ~46 | BTM family, slots 02+ not documented; chair-emitted confirmed via 4-source zero-hit sweep; BT-Mouse application firmware not in dump set (the available HCS08 artifact is a bootloader stub only) |
+| XTD `0x0A400X0Y` (other slots) | ~46 | BTM family, slots 02+ not documented; chair-emitted confirmed via 5-source dealer+chair-side zero-hit sweep (incl. BTMouse MC9S12X firmware); emitter module not yet identified |
 
 (`XTD 0x1C2C0X00` was promoted to **Documented** in 2026-05-23 after
 empirical cross-checks. `XTD 0x14300X01` was previously promoted but

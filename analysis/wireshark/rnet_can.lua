@@ -10,16 +10,38 @@
 --   wireshark -X lua_script:rnet_can.lua capture.pcapng
 --
 -- EVIDENCE BASIS:
---   Frame interpretations are taken from runnable code that has been used
---   against real captures:
---     * open-rnet/tools/rnet_utils.py:decode_frame()  (line ~260) — the spine
---     * open-rnet/lib/can2RNET.py — wire format primitives
---     * open-rnet/contrib/can2RNET/JoyLocal.py — joystick frame use
---     * open-rnet/tools/rnet_utils.py:parse_auth_frame_id() — serial-auth layout
+--   Tier definitions:
+--     * "Code"       = primary-source decompile of vendor firmware/binary
+--                      (DongleInterface.dll, DLR EXE, IRConfigurator.exe,
+--                      LEDJSM HCS12 firmware, BTMouse MC9S12X firmware).
+--                      Citation includes specific function name + address
+--                      where possible.
+--     * "Documented" = community-derived reverse-engineering or community
+--                      observation. This includes open-rnet's Python decoders
+--                      (rnet_utils.py, extract_config_data.py), open-rnet's
+--                      spec documents (RNET_PROTOCOL_SPECIFICATION.md,
+--                      RNET_ERROR_CODES.md, RNET_FRAME_DICTIONARY.md), and
+--                      community dictionaries (janschu99 RNETdictionary.txt,
+--                      RNETcanframe_diary.txt). These have been
+--                      independently observed-to-work but are NOT
+--                      authoritative — open-rnet itself contains errors
+--                      that rnet-firmware's primary-source RE has surfaced
+--                      (e.g. open-rnet's BTMouse MCU mis-id, 96.8%
+--                      similarity claim, BTMouse 0x0160 key
+--                      interpretation). Treat community RE as a useful
+--                      starting hypothesis, not a fact.
+--     * "Inferred"   = family-analogy or parse-empirical pattern
+--                      observation with no other supporting source.
 --
---   Entries derived only from the prose reference RNET_FRAME_DICTIONARY.md
---   (no corroborating runnable code) are marked "[unverified]" so users can
---   tell at a glance which interpretations are well-grounded.
+--   Frame interpretations are taken (in order of decreasing authority) from:
+--     1. Primary-source firmware decompiles in rnet-firmware (private repo)
+--     2. open-rnet community RE (rnet_utils.py, spec docs) — Documented tier
+--     3. Wire captures + parse's own cross-corpus pattern analysis
+--
+--   Entries that rest only on RNET_FRAME_DICTIONARY.md (community prose,
+--   no corroborating runnable code or primary decompile) are marked
+--   "[unverified]" so users can tell at a glance which interpretations
+--   are well-grounded.
 --
 -- STRUCTURAL NOTE — 29-bit extended CAN IDs and Device-Type-ID:
 --   Per LEDJSM MSCAN_RX_ISR @ 0x449C (HCS12 firmware plate comment): the
@@ -657,7 +679,7 @@ local function decode_joystick(tvb, t, cid)
         end
         t:add(pf.summary, string.format("Joystick X=%+4d Y=%+4d%s", x, y, dir))
     end
-    add_evidence(t, "Code", "rnet_utils.py:330")
+    add_evidence(t, "Documented", "rnet_utils.py:330 (open-rnet community RE)")
     return "Joy"
 end
 
@@ -686,7 +708,7 @@ local function decode_battery(tvb, t, cid)
         local bar = string.rep("█", bars) .. string.rep("░", 10-bars)
         t:add(pf.summary, string.format("Battery %3d%% %s", pct, bar))
     end
-    add_evidence(t, "Code", "rnet_utils.py:352")
+    add_evidence(t, "Documented", "rnet_utils.py:352 (open-rnet community RE)")
     return "Batt"
 end
 
@@ -728,7 +750,7 @@ local function decode_distance(tvb, t, cid)
         t:add(pf.summary, string.format(
             "Distance slot=%X  (truncated, DLC<8)", slot))
     end
-    add_evidence(t, "Code", "rnet_utils.py:415")
+    add_evidence(t, "Documented", "rnet_utils.py:415 (open-rnet community RE)")
     return "Dist"
 end
 
@@ -747,7 +769,7 @@ local function decode_motor_enable(tvb, t, cid)
         t:add(pf.summary, string.format(
             "Motor enable slot=%X  (truncated, DLC<2)", slot))
     end
-    add_evidence(t, "Code", "rnet_utils.py:430")
+    add_evidence(t, "Documented", "rnet_utils.py:430 (open-rnet community RE)")
     return "MotEn"
 end
 
@@ -758,7 +780,7 @@ local function decode_horn(tvb, t, cid)
     t:add(pf.slot, slot)
     t:add(pf.horn_state, state)
     t:add(pf.summary, string.format("Horn %s slot=%X", state, slot))
-    add_evidence(t, "Code", "rnet_utils.py:346")
+    add_evidence(t, "Documented", "rnet_utils.py:346 (open-rnet community RE)")
     return "Horn"
 end
 
@@ -820,7 +842,7 @@ local function decode_serial_heartbeat(tvb, t)
             t:add(pf.summary, string.format("JSM serial=%s", sn))
         end
     end
-    add_evidence(t, "Code", "rnet_utils.py:275")
+    add_evidence(t, "Documented", "rnet_utils.py:275 (open-rnet community RE)")
     return "SerHB"
 end
 
@@ -900,7 +922,7 @@ local function decode_auth(tvb, t, cid, is_rtr)
             "Auth response seq=%d slot=%X extended round%s",
             seq, slot, ext_tag))
     end
-    add_evidence(t, "Code", "rnet_utils.py:315 + parse_auth_frame_id:128")
+    add_evidence(t, "Documented", "rnet_utils.py:315 + parse_auth_frame_id:128 (open-rnet community RE)")
     return "Auth"
 end
 
@@ -1263,7 +1285,7 @@ local function decode_mode_config(tvb, t, cid)
 
     t:add(pf.summary, string.format("ModeCfg mode=%d subaddr=0x%02X type=0x%02X (%s)%s",
         mode, subaddr, typ, mode_type_names[typ] or "?", detail))
-    add_evidence(t, "Code", "cJSM display-protocol notes §Mode Configuration Frames + empirical Type-0x61 decode")
+    add_evidence(t, "Documented", "parse decode_mode_config — per-Type empirical cross-capture validation (rnet-firmware RNET_FAMILY_DECODE_GAPS.md gap #4 confirms 'chair-side only, zero DLL hits' — no primary-source decoder exists; previous citation to 'cJSM display-protocol notes' could not be located in any doc tree)")
     return "ModeCfg"
 end
 
@@ -1280,7 +1302,7 @@ local function decode_tones(tvb, t)
         t:add(pf.tones, s)
         t:add(pf.summary, "Tones: " .. s)
     end
-    add_evidence(t, "Code", "rnet_utils.py:377")
+    add_evidence(t, "Documented", "rnet_utils.py:377 (open-rnet community RE)")
     return "Tone"
 end
 
@@ -1303,7 +1325,7 @@ local function decode_device_enum(tvb, t, cid)
                 slot, bytes_to_hex(tvb, 0, 8)))
         end
     end
-    add_evidence(t, "Code", "rnet_utils.py:389 + DeviceDriver.GetSN decompile")
+    add_evidence(t, "Code", "IRConfigurator.exe DeviceDriver.GetSN (.NET decompile, primary source) for DIME→serial decode; rnet_utils.py:389 (open-rnet community RE) for the wire-frame ID mask")
     return "DevEnum"
 end
 
@@ -1314,7 +1336,7 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
     if cid == 0x000 then
         t:add(pf.class, is_rtr and "Sleep all devices" or "Sleep command")
         t:add(pf.summary, is_rtr and "Sleep all (RTR)" or "Sleep cmd")
-        add_evidence(t, "Code", "rnet_utils.py:271")
+        add_evidence(t, "Documented", "rnet_utils.py:271 (open-rnet community RE)")
         return "Sleep"
     elseif cid == 0x002 then
         -- Semantic from dictionary §1 (RNET_FRAME_DICTIONARY.md):
@@ -1340,19 +1362,19 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
     elseif cid == 0x00C then
         t:add(pf.class, "Network test")
         t:add(pf.summary, "Network test (STD 0x00C, periodic bus-presence probe)")
-        add_evidence(t, "Code", "rnet_utils.py:273")
+        add_evidence(t, "Documented", "rnet_utils.py:273 (open-rnet community RE)")
         return "NetTest"
     elseif cid == 0x00E then
         return decode_serial_heartbeat(tvb, t)
     elseif cid == 0x040 then
         t:add(pf.class, "Open parameter page")
         t:add(pf.summary, "Open parameter page (STD 0x040, programmer→bus signaling)")
-        add_evidence(t, "Code", "rnet_utils.py:279")
+        add_evidence(t, "Documented", "rnet_utils.py:279 (open-rnet community RE)")
         return "OpenParam"
     elseif cid == 0x041 then
         t:add(pf.class, "Close parameter page")
         t:add(pf.summary, "Close parameter page (STD 0x041, programmer→bus signaling)")
-        add_evidence(t, "Code", "rnet_utils.py:281")
+        add_evidence(t, "Documented", "rnet_utils.py:281 (open-rnet community RE)")
         return "CloseParam"
     elseif cid == 0x050 then
         -- Per janschu99 dictionary line 10: `050#Ss0M00XX` JSMrx,
@@ -1438,12 +1460,12 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
     elseif cid == 0x7B0 then
         t:add(pf.class, "Config mode 0")
         t:add(pf.summary, "Config mode 0 (STD 0x7B0, configuration-mode signaling)")
-        add_evidence(t, "Code", "rnet_utils.py:303")
+        add_evidence(t, "Documented", "rnet_utils.py:303 (open-rnet community RE)")
         return "Cfg0"
     elseif cid == 0x7B1 then
         t:add(pf.class, "Config mode 1")
         t:add(pf.summary, "Config mode 1 (STD 0x7B1, configuration-mode signaling)")
-        add_evidence(t, "Code", "rnet_utils.py:305")
+        add_evidence(t, "Documented", "rnet_utils.py:305 (open-rnet community RE)")
         return "Cfg1"
     elseif cid == 0x7B3 then
         t:add(pf.class, is_rtr and "Serial exchange request" or "Serial exchange")
@@ -1452,7 +1474,7 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         else
             t:add(pf.summary, "Serial exchange (STD 0x7B3, chair-side enum response)")
         end
-        add_evidence(t, "Code", "rnet_utils.py:307")
+        add_evidence(t, "Documented", "rnet_utils.py:307 (open-rnet community RE)")
         return "SerExch"
     elseif cid >= 0x040 and cid <= 0x04F then
         -- Param-page family extension. 0x040/041 documented (open/close).
@@ -1472,7 +1494,7 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         return "ParamX"
     elseif cid >= 0x050 and cid <= 0x05F then
         -- Profile-change family member. DongleInterface.dll
-        -- CCANMsg::IsProfileChangeMsg @ 0x10001b50 tests
+        -- CCANMsg::IsProfileChangeMsg @ 0x10001610 tests
         -- StdIDMatches(0x50) (i.e. (canid & 0xFF0) == 0x50), so the
         -- whole 0x050-0x05F range is the profile-change family per
         -- official PGDT naming. (janschu99's "Mode map" name on 0x050
@@ -1490,11 +1512,11 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         t:add(pf.class, string.format("Profile change family (fn 0x%X)", fn))
         t:add(pf.summary, string.format("Profile change family, function 0x%X (payload semantic chair-side, no dealer decoder)", fn))
         add_evidence(t, "Code",
-            "DongleInterface.dll IsProfileChangeMsg @ 0x10001b50 (classifier only; no in-DLL callers, no DLR EXE refs)")
+            "DongleInterface.dll IsProfileChangeMsg @ 0x10001610 (classifier only; no in-DLL callers, no DLR EXE refs)")
         return "ProfChg"
     elseif cid >= 0x060 and cid <= 0x06F then
         -- Mode-change family member. DongleInterface.dll
-        -- CCANMsg::IsModeChangeMsg @ 0x10001b00 tests
+        -- CCANMsg::IsModeChangeMsg @ 0x100015e0 tests
         -- StdIDMatches(0x60) AND data[0] != 0x90 — payloads with
         -- data[0] == 0x90 are a separate sibling family (PM-tx
         -- joystick events per janschu99 diary; DLL handles them via a
@@ -1517,17 +1539,28 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
             t:add(pf.class, string.format("Mode change family (fn 0x%X)", fn))
             t:add(pf.summary, string.format("Mode change family, function 0x%X (payload semantic chair-side, no dealer decoder)", fn))
             add_evidence(t, "Code",
-                "DongleInterface.dll IsModeChangeMsg @ 0x10001b00 (classifier only; no in-DLL callers, no DLR EXE refs)")
+                "DongleInterface.dll IsModeChangeMsg @ 0x100015e0 (classifier only; no in-DLL callers, no DLR EXE refs)")
         end
         return "ModeChg"
     elseif cid >= 0x7B0 and cid <= 0x7BF then
-        -- Config-mode family extension. 0x7B0/7B1/7B3 documented in
-        -- rnet_utils.py. 7B2/7B4-7BF by analogy.
+        -- Config-mode family. 0x7B0/7B1/7B3 documented in rnet_utils.py.
+        -- The whole 0x7B0-0x7BF range is now chair-side EVIDENCED: it
+        -- appears in the BTMouse MC9S12X MSCAN acceptance-filter table
+        -- at firmware addresses 0x56F2-0x5716 (16-bit BE words; low 12
+        -- bits = standard CAN ID, high nibble = filter-bank flag).
+        -- The filter explicitly lists 0x7B0 (flag 0x4), 0x7B1, 0x7B2,
+        -- 0x7B3, 0x7B6, and 0x7B0 again with flag 0x8 — i.e. BTMouse
+        -- RECEIVES this family from the bus. Emitter still unidentified
+        -- (FTDI dongle firmware is the most likely candidate; not in
+        -- v5/v6 DLL ServiceCANMsg dispatch as a literal). Wider 0x7Bx
+        -- range (7B7/7B8/7B9/7BB-7BF) appears in BTMouse firmware
+        -- string-search (124 hits) but isn't observed in the corpus.
         local fn = cid - 0x7B0
-        t:add(pf.class, string.format("Config-mode family (fn 0x%X) [unverified]", fn))
-        t:add(pf.summary, string.format("Config-mode family, function 0x%X", fn))
-        add_evidence(t, "Inferred", "family-analogy to documented 0x7B0/0x7B1/0x7B3")
-        return "CfgFamX"
+        t:add(pf.class, string.format("Config-mode family (fn 0x%X)", fn))
+        t:add(pf.summary, string.format("Config-mode family, function 0x%X (BTMouse-listened; emitter unidentified)", fn))
+        add_evidence(t, "Code",
+            "BTMouse MC9S12X acceptance-filter table @ FW 0x56F2-0x5716 (chair-side primary source)")
+        return "CfgFam"
     else
         t:add(pf.class, string.format("Unknown STD 0x%03X", cid))
         return nil
@@ -1556,14 +1589,14 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         local n = (cid == 0x0A400300) and 1 or 2
         t:add(pf.class, string.format("BTM Control %d", n))
         t:add(pf.summary, string.format("BTMouse Control %d", n))
-        add_evidence(t, "Code", "DongleInterface.dll wire-format notes §14.2")
+        add_evidence(t, "Documented", "open-rnet RNET_PROTOCOL_SPECIFICATION.md §14.2 (community spec; was mis-cited as 'DLL wire-format notes' but rnet-firmware confirms this section is open-rnet's own)")
         return "BTMctl"
     elseif cid == 0x0A400002 or cid == 0x0A400102 then
         -- BTMouse Status 1/2 — same family, §14.2.
         local n = (cid == 0x0A400002) and 1 or 2
         t:add(pf.class, string.format("BTM Status %d", n))
         t:add(pf.summary, string.format("BTMouse Status %d", n))
-        add_evidence(t, "Code", "DongleInterface.dll wire-format notes §14.2")
+        add_evidence(t, "Documented", "open-rnet RNET_PROTOCOL_SPECIFICATION.md §14.2 (community spec; was mis-cited as 'DLL wire-format notes' but rnet-firmware confirms this section is open-rnet's own)")
         return "BTMstat"
     elseif bit.band(cid, 0xFFFFF0F0) == 0x0C040000 then
         return decode_horn(tvb, t, cid)
@@ -1586,7 +1619,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         t:add(pf.jsm_signature, valid):set_generated()
         t:add(pf.summary, valid and "JSM heartbeat (signature 87×7 OK, 100ms periodic)"
                                 or "JSM heartbeat (UNEXPECTED PAYLOAD)")
-        add_evidence(t, "Code", "janschu99 RNETdictionary.txt:26 + empirical 500/500 corroboration")
+        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt:26 (community dictionary) + parse-empirical 500/500 corroboration")
         return "JSMhb"
     elseif bit.band(cid, 0xFFFFF0FF) == 0x0C140000 then
         -- 0x0C14[slot]00 = module-emitted heartbeat. Originally documented
@@ -1619,7 +1652,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
                 "%s slot=%X byte0=0x%02X (TC=%d → %s)%s",
                 label, slot, b, tc, slot_name(other), phase))
         end
-        add_evidence(t, "Code", "janschu99 RNETdictionary.txt:44-45 + POP byte-0 reuse cross-check")
+        add_evidence(t, "Documented", "janschu99 RNETdictionary.txt:44-45 (community dictionary) + parse-empirical POP byte-0 reuse cross-check")
         return "Hb"
     elseif cid == 0x181C0D00 or cid == 0x181C0100 then
         -- Both function bytes 0x0D and 0x01 play tones. Per janschu99
@@ -1642,7 +1675,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         -- DongleInterface.dll wire-format §1059; RNET_PROTOCOL_LAYER_MAP.md.
         t:add(pf.class, "Transfer Complete sentinel (R-Net CXTN_UPLOAD/DOWNLOAD → CXTN_RNET)")
         t:add(pf.summary, "ReBus transfer complete — R-Net returns to CXTN_RNET")
-        add_evidence(t, "Code", "extract_config_data.py:68-69 + DongleInterface.dll wire-format §1059")
+        add_evidence(t, "Documented", "extract_config_data.py:68-69 (open-rnet community RE); the 'DLL wire-format §1059' part previously cited here is unverified — no doc with that section reference exists in rnet-firmware")
         return "XferDone"
     elseif bit.band(bit.rshift(cid, 18), 0x7E0) == 0x780 then
         -- POP extended-ID frame. Rigorous membership test from
@@ -1798,7 +1831,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         t:add(pf.class, "Device state")
         t:add(pf.slot, slot)
         t:add(pf.summary, string.format("Device slot=%X %s", slot, state))
-        add_evidence(t, "Code", "rnet_utils.py:424")
+        add_evidence(t, "Documented", "rnet_utils.py:424 (open-rnet community RE)")
         return "DevState"
     elseif bit.band(cid, 0xFFFFF0F0) == 0x0C180000 then
         return decode_motor_enable(tvb, t, cid)
@@ -1825,7 +1858,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
                     "⚠ Status slot=%X code=0x%04X (undocumented)", slot, code))
             end
         end
-        add_evidence(t, "Code", "rnet_utils.py:437 + docs/RNET_ERROR_CODES.md (302 entries)")
+        add_evidence(t, "Documented", "rnet_utils.py:437 + open-rnet docs/RNET_ERROR_CODES.md (302 entries); both community RE — no primary-source decode of the error-code semantics yet")
         return "Status"
     elseif cid == 0x0C280000 then
         -- "PM connected" sentinel — sent once by PM after the serial-number
@@ -1851,26 +1884,33 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         add_evidence(t, "Inferred", "family-analogy to documented 0x0C280000 PM-connected")
         return "ModConn"
     elseif bit.band(cid, 0xFFFFF000) == 0x0A400000 then
-        -- BTM (Bluetooth Mouse) family extension. The documented entries
+        -- BTM (BT-Mouse) family extension. The documented entries
         -- (0x0A400002/0102 Status 1/2, 0x0A400300/01 Control 1/2) are
         -- specific cases of this prefix. Variants like 0x0A4002X1 and
         -- 0x0A400401 appear in captures but aren't documented in the
         -- open-rnet spec §14.2; treat as BTM-family with the
-        -- function/sub bytes surfaced. Direction CONFIRMED chair→bus
-        -- by 4-source dealer-side zero-hit sweep (v5 DLL + v6 DLL +
-        -- DLR EXE + LEDJSM HCS12). The available HCS08 firmware
-        -- artifact (shared_hcs08_firmware.s19) is a bootloader stub
-        -- only — 19 symbols, NVM/flash/reset-vector code — NOT the
-        -- BT-Mouse application firmware, so it neither confirms nor
-        -- refutes BTM-side decode. Sub-byte semantics (byte 2 = family
-        -- selector, byte 3 = instance/sub-index; single-byte payload
-        -- looks like channel-nibble + sub-nibble) stay Inferred
-        -- pending the actual BT-Mouse application firmware dump.
+        -- function/sub bytes surfaced.
+        --
+        -- Origin: 4 dealer-side sources (v5 DLL, v6 DLL, DLR EXE,
+        -- LEDJSM HCS12) zero-hit on these IDs; the BT-Mouse application
+        -- firmware (btmouse_combined_24bit.bin, MC9S12X) also zero-hits
+        -- as literal bytes. Two possibilities: (a) MSCAN-packed format
+        -- in BTMouse firmware (bit-unpacking would find them), or
+        -- (b) another chair module we don't have a dump for. The
+        -- BTMouse acceptance filter at FW 0x56F2-0x5716 does NOT list
+        -- the 0x0A40 family, suggesting BTMouse doesn't receive these
+        -- either. Sub-byte semantics (byte 2 = family selector,
+        -- byte 3 = instance/sub-index; single-byte payload looks like
+        -- channel-nibble + sub-nibble) stay Inferred.
+        --
+        -- (NB: an earlier rnet-firmware reply attributed these to
+        -- "BTM HCS08" — that was based on a misidentified bootloader
+        -- stub. BTMouse is actually MC9S12X-family.)
         local sub = bit.band(cid, 0xFFFF)
         t:add(pf.class, string.format("BTM family (sub 0x%04X) [unverified semantic]", sub))
-        t:add(pf.summary, string.format("BTM family sub=0x%04X (chair→bus, BT-Mouse module; app firmware not in dump set)", sub))
+        t:add(pf.summary, string.format("BTM family sub=0x%04X (chair→bus; emitter module not yet identified)", sub))
         add_evidence(t, "Inferred",
-            "family-analogy to documented BTM Control/Status; chair-emitted confirmed by 4-source dealer-side zero-hit sweep (HCS08 artifact in project is bootloader stub, not BTM app firmware)")
+            "family-analogy to documented BTM Control/Status; chair-emitted confirmed by 5-source dealer+chair-side zero-hit sweep (incl. BTMouse MC9S12X firmware); BTMouse acceptance filter doesn't list 0x0A40 family")
         return "BTMx"
     elseif bit.band(cid, 0xFFFFF0FF) == 0x1C200000 then
         -- Per janschu99 categorized dictionary line 52:
@@ -1919,7 +1959,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         return "MotInt"
     elseif cid == 0x15000000 then
         -- SlotChanged signal: chair→dealer notification that slot config
-        -- has changed. DongleInterface.dll v5 IsSlotChangedMsg @ 0x10001b90
+        -- has changed. DongleInterface.dll v5 IsSlotChangedMsg @ 0x10001630
         -- tests (canid >> 18) == 0x540 (= 0x15000000 >> 18). Consumer
         -- CheckForSlotChanged @ 0x10008b00 reads payload bytes [0..3] as
         -- LE u32 slot_change_filekey into CFTDIInterface +0x15cc, then
@@ -1934,7 +1974,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         t:add(pf.summary, "SlotChanged filekey=" .. key_str)
         add_evidence(t, "Code",
             "DongleInterface.dll v5 CheckForSlotChanged @ 0x10008b00 + " ..
-            "IsSlotChangedMsg @ 0x10001b90")
+            "IsSlotChangedMsg @ 0x10001630")
         return "SlotChanged"
     elseif bit.band(cid, 0xFFF00000) == 0x1E800000 then
         -- 0x1E8X = R-Net session-control namespace (NOT POP, NOT ReBus).
