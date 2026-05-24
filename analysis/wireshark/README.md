@@ -38,7 +38,7 @@ traffic we can reproduce, empirical cross-checks against multiple
 captures. Others are educated guesses from patterns and adjacent
 neighbors. The `rnet.confidence` field (see "Evidence policy" below)
 tells you which is which on a per-rule basis. Today the rules break
-down as **54% Code, 28% Documented, 18% Inferred** — we try to be
+down as **55% Code, 27% Documented, 18% Inferred** — we try to be
 honest about that uncertainty so you can decide what to trust.
 
 **If you can help, especially with new capture logs, please do.** See
@@ -268,8 +268,8 @@ Across 55 evidence-tagged decode rules in the dissector:
 
 | Kind        | Count | %    |
 |-------------|------:|-----:|
-| Code        |    29 | 54%  |
-| Documented  |    15 | 28%  |
+| Code        |    30 | 55%  |
+| Documented  |    15 | 27%  |
 | Inferred    |    10 | 18%  |
 
 These percentages move as research progresses — `Inferred` entries
@@ -566,6 +566,94 @@ evidenced + 0.97% `[unverified]` + 0.08% unknown** (the remaining
 25 frames are scattered across 9 different rare IDs, none worth a
 dedicated decoder).
 
+## Authentication and access control — the whole story
+
+R-Net's "auth" is **not cryptographic** and the wire shows two
+distinct things the dissector decodes. This section ties together
+what the dissector labels as "Serial auth" vs the Unlock frame vs
+repository discovery, so the per-frame labels make sense at the
+protocol level.
+
+### Per the v5/v6 `DongleInterface.dll` decompile
+
+Per `RNET_AUTH_PROTOCOL.md`'s decode of `CRnetInterface::SendUnlock`
+and friends, R-Net's chair-side access control has three pieces:
+
+1. **CAN-bus presence** = the primary credential. Anyone who can
+   transmit on the bus can speak the protocol.
+2. **A single broadcast Unlock frame** — extended CAN ID `0x08280F02`,
+   DLC=0. The CAN-ID *is* the credential. The chair gates
+   destructive service-mode operations (parameter writes, fault
+   clearing) on having recently received this exact frame.
+3. **Repository ownership tokens** — one-byte tokens per chair-side
+   repository, mediated via service-discovery messages. Cooperative
+   ownership; chair enforces by broadcast contention, not crypto.
+
+Notably absent: challenge-response, per-message signing, session
+keys, certificates. *Zero* "Auth/Authenticate/Challenge/Verify"
+strings appear in the DLL. The "auth" model is designed against
+**accidental cross-talk between programmers on a shared bus**, not
+against an adversary with bus access.
+
+### What the dissector shows you, frame by frame
+
+| Frame family            | Meaning                                          | What "successful" / "failed" looks like |
+|---|---|---|
+| `Serial auth — response` (CAN ID `0x1F<seq><slot><key><val>`) | Per-device serial-byte broadcast in response to a JSM challenge. Each device emits its 4-byte DIME serial across `seq=0..3` as `val = key XOR serial[seq]`, where `key` comes from a network-wide XOR table. | **Validated**: `✓ Table B` next to the label = `key[seq]` matches a known XOR table at that position. **Not validated**: no `✓` tag = the network's XOR table isn't one of our four known (A/B/C/D). The "validation" is just a network-identity match, not crypto — both sides know the table and the serial. |
+| `Serial auth — RTR challenge` (same CAN ID with RTR bit set) | The JSM asking each device "tell me byte N of your serial." | **In progress**: each challenge precedes the matching response by milliseconds. |
+| `R-Net Unlock — service-mode enable` (`0x08280F02`, DLC=0) | The Programmer flipping the chair into service mode. **The actual gate** for parameter writes / fault clearing chair-side. | **Successful** by emission: if the frame is on the wire, the chair's `CServiceManager` `+0x7b` "active" flag is presumed set. **No failure mode visible on wire** — the chair either accepts (silent) or ignores (also silent). |
+| `Transfer Complete sentinel` (`0x1E80000F`) and ReBus attach handshake (`0x1E84..87`) | R-Net session-layer state transitions (see "Protocol layering" above). | Distinct from "auth" — these are session-state transitions, not access-control events. |
+
+### The two "auth"-shaped wire flows aren't the same thing
+
+The `0x1F` Serial-auth handshake decoded by this dissector existed in
+the open-rnet DEFCON 24 research and is called "auth" by convention.
+The `RNET_AUTH_PROTOCOL.md` decode makes clear that:
+
+- The XOR exchange is **node-identity assertion** (each device proves
+  it knows its own serial), **not authentication** in the security
+  sense
+- The actual chair-side access-control gate is the **separate**
+  `0x08280F02` Unlock frame
+- The "Serial auth" label is retained because it's what readers
+  searching prior work will look for; the `✓ Table B` tag means
+  "this matches a known R-Net network configuration"
+
+### What "in progress" looks like
+
+The XOR handshake plays out as 8 challenge frames (JSM → bus) followed
+by 8 response frames (chair-side device → bus), per device. You'll see:
+
+```
+Auth challenge seq=0 slot=0 key=0xD3 (RTR — chair, please respond)
+Auth challenge seq=1 slot=0 key=0x92 (RTR — chair, please respond)
+... 6 more challenges
+Auth response seq=0 slot=0 serial[0]=0x50 ✓ Table B (matches known JSM serial)
+Auth response seq=1 slot=0 serial[1]=0xC0 ✓ Table B (matches known JSM serial)
+... 6 more responses
+```
+
+Filter `rnet.auth.network` to see only the successfully-validated
+responses; filter `rnet.class contains "challenge"` to see the
+in-progress challenge phase.
+
+### What's NOT decoded (yet)
+
+Per the new evidence, R-Net's access-control protocol also includes:
+
+- **Service opcodes 0x00-0x07** (PARAM_R/W, XY_CNT_R/W, KEYS_R,
+  FAULT_R/W, RTC_R) ride **inside** R-Net service frames; specific
+  wire layouts aren't yet pinned down for individual decoders.
+- **Service opcodes 0x80, 0x81** (repository discovery, file-slot
+  request) — same, layout TBD.
+- **Repository ownership token** (1 byte: TAKEN_BIT 0x10 | NODE_MASK
+  0x0F) — chair-internal state, surfaces on wire only as
+  side-effects of ownership negotiation.
+
+These are documented upstream in `RNET_AUTH_PROTOCOL.md` but the
+specific CAN-frame layouts needed for per-frame decoding aren't yet
+mapped. Future work.
+
 ## Reading the output — things that look weird but aren't bugs
 
 A few labels you'll see in real captures that surprise people. None
@@ -643,7 +731,7 @@ that pref is enabled).
 The headline coverage number counts frames, not decode rules. Some
 decode rules cover many thousands of frames (joystick, heartbeats),
 others cover a handful (rare faults). The README's separate
-**54% Code / 28% Documented / 18% Inferred** distribution counts
+**55% Code / 27% Documented / 18% Inferred** distribution counts
 **rules**, not frames. A capture can be 99% evidenced even though
 most of its rules are Documented or Inferred, because the few Code-
 tier rules cover the bulk of the wire traffic.

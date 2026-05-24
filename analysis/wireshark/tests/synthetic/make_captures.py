@@ -136,6 +136,14 @@ EDGE_CASES = {
     "sentinel_subtype_3": [
         {"id": 0x1E830000, "data": b"", "extended": True},
     ],
+    # R-Net Unlock frame (per RNET_AUTH_PROTOCOL.md, the literal "service
+    # mode enable" credential — CAN-ID 0x08280F02, DLC=0). Doesn't appear
+    # in any open-rnet capture but the dissector should still recognize
+    # it if it shows up in a future capture from a Programmer-attached
+    # session that includes the unlock moment.
+    "rnet_unlock_frame": [
+        {"id": 0x08280F02, "data": b"", "extended": True},
+    ],
 }
 
 

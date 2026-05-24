@@ -83,6 +83,33 @@ def test_synthetic_frame_handled_without_lua_error(edge_pcap_dir, label):
     )
 
 
+def test_rnet_unlock_frame_decoded_with_service_mode_label(edge_pcap_dir):
+    """The R-Net Unlock frame (0x08280F02, DLC=0) is the literal
+    "service-mode enable" credential per RNET_AUTH_PROTOCOL.md —
+    CRnetInterface::SendUnlock @ DongleInterface.dll 0x10010340 (v5)
+    transmits this exact extended-29-bit ID and the chair gates
+    destructive operations on having received it.
+
+    The dissector must label it as Unlock specifically, not let it
+    fall through to "Unknown XTD."""
+    proc = subprocess.run(
+        ["tshark", "-X", f"lua_script:{LUA}",
+         "-r", str(edge_pcap_dir["rnet_unlock_frame"]),
+         "-T", "fields", "-e", "rnet.class", "-e", "rnet.summary"],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert proc.returncode == 0, proc.stderr
+    rows = [l.split("\t") for l in proc.stdout.splitlines() if l.strip()]
+    assert rows, "no output from unlock-frame capture"
+    class_, summary = rows[0][0], rows[0][1]
+    assert "Unlock" in class_, (
+        f"expected 'Unlock' in class; got {class_!r}"
+    )
+    assert "service" in summary.lower(), (
+        f"expected summary to mention service mode; got {summary!r}"
+    )
+
+
 def test_expert_info_fires_on_unknown_sentinel_subtypes(edge_pcap_dir):
     """Plan 6: the 0x1E8X expert-info marker should fire on unknown
     subtypes (N=1, 2, 3) and NOT fire on documented ones (N=0/4/5/6/7).

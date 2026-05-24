@@ -1880,6 +1880,32 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         end
         add_evidence(t, conf, src)
         return "Sentinel"
+    elseif cid == 0x08280F02 then
+        -- R-Net Unlock — service-mode enable. The CAN ID IS the
+        -- credential: this exact 29-bit ID with DLC=0 is what
+        -- CRnetInterface::SendUnlock transmits (DongleInterface.dll v5
+        -- @ 0x10010340, v6 @ 0x1000bcf0). The chair gates destructive
+        -- service-mode operations (parameter writes, fault clearing,
+        -- CServiceManager active lock at +0x7b) on having recently
+        -- received this frame.
+        --
+        -- 29-bit ID bit-field per RNET_AUTH_PROTOCOL.md:
+        --   priority=0x08, mode=0x28 (R-Net), service=0x0F (unlock),
+        --   node=0x02 (Programmer source)
+        --
+        -- This is NOT cryptographic auth — anyone with CAN-bus access
+        -- who knows this exact ID can unlock service mode on every
+        -- R-Net chair on the bus. Per the doc: "The R-Net 'auth' is
+        -- access control to prevent accidental cross-talk between
+        -- simultaneously-connected programmers, not a security
+        -- boundary against an attacker with bus access."
+        t:add(pf.class, "R-Net Unlock — service-mode enable")
+        t:add(pf.summary,
+              "R-Net Unlock (DLC=0) — Programmer enables chair-side service mode "..
+              "(parameter writes, fault clearing). Not crypto auth; CAN-ID IS the credential.")
+        add_evidence(t, "Code",
+                     "DongleInterface.dll v5 CRnetInterface::SendUnlock @ 0x10010340 (v6 @ 0x1000bcf0)")
+        return "Unlock"
     else
         t:add(pf.class, string.format("Unknown XTD 0x%08X", cid))
         return nil
