@@ -285,7 +285,7 @@ local pe = {
     -- it is.
     bt_unlock_pattern_b = ProtoExpert.new(
         "rnet.expert.bt_unlock_pattern_b",
-        "NOTABLE: standard CAN frame, ID == 0x07A0 exactly, DLC=8, all 8 data bytes zero — matches BTMouse unlock-protocol Pattern B (TRIGGER); fires the unlock if recently primed by Pattern A + runtime flag set",
+        "NOTABLE: standard CAN frame, ID == 0x07A0 exactly, DLC=8, all 8 data bytes zero — matches BTMouse-internal unlock-protocol Pattern B (TRIGGER); fires the BTMouse-side unlock if recently primed by Pattern A + runtime flag set. NB: this is DISTINCT from the dongle's 0x08280F02 R-Net Unlock (which targets PM/SM, not BTMouse)",
         expert.group.PROTOCOL, expert.severity.NOTE),
 
     -- BT-pairing-unlock protocol — the actual two-frame SEQUENCE
@@ -1324,7 +1324,8 @@ local function decode_pop_std(tvb, t, cid, pinfo)
             slot_name(this_node), slot_name(other),
             op, reg_str, text_str, extra_str))
     end
-    add_evidence(t, "Code", "DongleInterface.dll CPOPMsg class (Ghidra)")
+    add_evidence(t, "Code",
+        "DongleInterface.dll CPOPMsg class (Ghidra); CAN-ID base (0x780/0x790) cross-validated 4-ways: DLL v5 + DLL v6 + DLR EXE + BTMouse MC9S12X MSCAN acceptance filter @ FW 0x56F4/0x56F6 (RNET_PRIMARY_SOURCE_CROSS_VALIDATION.md)")
     return "POPstd"
 end
 
@@ -1580,8 +1581,10 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
     elseif cid == 0x7A0 then
         -- Normal case: Programmer presence announcement (DLC=0).
         -- Sent by the Programmer when it joins the bus. Per
-        -- frame-class glossary notes + open-rnet
-        -- UPD_HUNT_AND_POP_FINDING.md.
+        -- rnet-firmware RNET_FRAME_GLOSSARY.md (the older
+        -- UPD_HUNT_AND_POP_FINDING.md doc was retired in
+        -- rnet-firmware's 2026-05-24 cleanup pass; the glossary
+        -- preserves the conclusion).
         --
         -- Datasheet-verified rare case (per rnet-firmware commit
         -- f4197494): STD 0x07A0 + DLC=8 + all-zero is the actual
@@ -1601,7 +1604,7 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
                 t:add(pf.class,
                     "0x07A0 DLC=8 all-zero — BTMouse unlock-protocol Pattern B trigger")
                 t:add(pf.summary,
-                    "BTMouse unlock-protocol Pattern B (TRIGGER) — fires the chair-side unlock if a Pattern A seed was sent recently AND runtime flag 0xFF4C4 is set")
+                    "BTMouse-internal unlock-protocol Pattern B (TRIGGER) — fires the BTMouse-side unlock if a Pattern A seed was sent recently AND runtime flag 0xFF4C4 is set. DISTINCT from the dongle's 0x08280F02 R-Net Unlock (which targets PM/SM chair-controller, not BTMouse).")
                 add_evidence(t, "Code",
                     "BTMouse MC9S12X handler 0xF50E + datasheet-verified FUN_00430E LEAX D,X disassembly (BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md / rnet-firmware commit f4197494)")
                 return "BTUnlockB"
@@ -1609,7 +1612,7 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         end
         t:add(pf.class, "Programmer presence")
         t:add(pf.summary, "Programmer presence announcement")
-        add_evidence(t, "Documented", "frame-class glossary notes + UPD_HUNT_AND_POP_FINDING.md")
+        add_evidence(t, "Documented", "rnet-firmware RNET_FRAME_GLOSSARY.md (preserves the retired UPD_HUNT_AND_POP_FINDING.md conclusion)")
         return "ProgHere"
     elseif cid == 0x7B0 then
         t:add(pf.class, "Config mode 0")
@@ -2265,18 +2268,35 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         --   priority=0x08, mode=0x28 (R-Net), service=0x0F (unlock),
         --   node=0x02 (Programmer source)
         --
+        -- *** TARGET CLARIFICATION (per rnet-firmware PARSE_HANDOFF_NOTES.md
+        -- action #4 + RNET_FAMILY_DECODE_GAPS.md Gap #1): ***
+        -- This 0x08280F02 unlock is dongle→PM/SM-bound. BTMouse's
+        -- acceptance filter at FW 0x56F2 does NOT include 0x08280F02,
+        -- so BTMouse is NOT the consumer of this unlock — it's
+        -- targeted at the chair-controller (PM/SM firmware, not yet
+        -- dumped). BTMouse has its own SEPARATE chair-side unlock-
+        -- magic protocol with completely different wire patterns
+        -- (Pattern A `(can_id & 0x3FFFF) == 0x07E57` extended +
+        -- Pattern B `can_id == 0x7A0` standard) — see the BT-unlock
+        -- markers in the expert-info table. The two unlock mechanisms
+        -- coexist with different recipients; this decoder is for the
+        -- dongle→PM/SM one.
+        --
         -- This is NOT cryptographic auth — anyone with CAN-bus access
         -- who knows this exact ID can unlock service mode on every
         -- R-Net chair on the bus. Per the doc: "The R-Net 'auth' is
         -- access control to prevent accidental cross-talk between
         -- simultaneously-connected programmers, not a security
         -- boundary against an attacker with bus access."
-        t:add(pf.class, "R-Net Unlock — service-mode enable")
+        t:add(pf.class, "R-Net Unlock — service-mode enable (dongle → PM/SM)")
         t:add(pf.summary,
               "R-Net Unlock (DLC=0) — Programmer enables chair-side service mode "..
-              "(parameter writes, fault clearing). Not crypto auth; CAN-ID IS the credential.")
+              "(parameter writes, fault clearing). Target: chair-controller (PM/SM); "..
+              "BTMouse uses a separate unlock-magic protocol. "..
+              "Not crypto auth; CAN-ID IS the credential.")
         add_evidence(t, "Code",
-                     "DongleInterface.dll v5 CRnetInterface::SendUnlock @ 0x10010340 (v6 @ 0x1000bcf0)")
+                     "DongleInterface.dll v5 CRnetInterface::SendUnlock @ 0x10010340 (v6 @ 0x1000bcf0); "..
+                     "BTMouse negative finding: ID not in BTMouse acceptance filter @ FW 0x56F2 (RNET_FAMILY_DECODE_GAPS.md Gap #1)")
         return "Unlock"
     else
         t:add(pf.class, string.format("Unknown XTD 0x%08X", cid))

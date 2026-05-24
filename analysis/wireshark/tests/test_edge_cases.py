@@ -353,8 +353,17 @@ def test_hv_clarity_rnet_unlock(edge_pcap_dir):
     )
     assert len(rows) == 1
     cls, summary, conf, src = rows[0]
-    assert cls == "R-Net Unlock — service-mode enable", (
+    assert cls.startswith("R-Net Unlock — service-mode enable"), (
         f"unexpected class: {cls!r}"
+    )
+    # Target-clarification phrasing added per rnet-firmware
+    # PARSE_HANDOFF_NOTES.md action #4 — class must distinguish this
+    # dongle-issued unlock from BTMouse's separate Pattern A/B
+    # internal-unlock protocol.
+    assert "PM/SM" in cls or "PM/SM" in summary, (
+        f"class/summary must identify the unlock target as PM/SM "
+        f"(distinct from BTMouse's separate unlock-magic): "
+        f"cls={cls!r} summary={summary!r}"
     )
     assert "service mode" in summary.lower(), (
         f"summary missing 'service mode': {summary!r}"
