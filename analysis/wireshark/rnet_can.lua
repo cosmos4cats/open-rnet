@@ -1576,19 +1576,36 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
             "BTMouse MC9S12X MSCAN acceptance-filter table @ FW 0x56F2-0x5718 (BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §5; chair-side primary source)")
         return "CfgFam"
     elseif cid == 0x7FA then
-        -- BTMouse-specific sentinel. Listed in BTMouse CAN-ID literal
-        -- table at FW 0x56E0 (entry 0, value 0x07FA) per
-        -- BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §4. INFERRED to map
-        -- to type-0 dispatch entry 3 (field1=0xA, DLC=0) which posts
-        -- event ID 1 to the BTMouse event queue. Semantic of "what
-        -- event 1 means" is not yet decoded (would need page-0x38
-        -- banked handlers). Zero corpus observations as of 2026-05-24
-        -- — forward-compat decoder so future captures get a meaningful
-        -- label.
+        -- BTMouse-listened sentinel. Listed in the chair-firmware-
+        -- family literal CAN-ID table at BTMouse FW 0x56E0 (entry 0,
+        -- value 0x07FA) AND at LEDJSM FW 0x57C8 (same byte sequence,
+        -- cross-firmware verified). Per BTMOUSE_POP_DISPATCH_
+        -- PRIMARY_SOURCE.md §4 (revised in rnet-firmware commit
+        -- dce1b296), this table is 28 entries × 2 bytes with format
+        -- {flag_nibble : 4 bits, CAN_ID : 12 bits} — every entry
+        -- decodes as a valid CAN ID with zero outliers, the table
+        -- contains many known-good IDs that parse already decodes
+        -- (0x060 mode-change, 0x780/0x790 POP base, 0x7B0-0x7B6
+        -- Config-mode, 0x7C0/0x7E0/0x7E4/0x7E8 POP family, 0x0F0
+        -- end-flags), and the table is the plausible source for the
+        -- MSCAN hardware acceptance-filter programming at FW
+        -- 0x6046-0x6073.
+        --
+        -- NB: an earlier rnet-firmware reply (commit 1b4fe705)
+        -- flagged a "provisional encoding" caveat that applied to a
+        -- DIFFERENT structure — the 5-byte dispatch records at
+        -- 0x5587 etc. that go through FUN_00430E bit-repack at match
+        -- time. That caveat does NOT apply here; the literal CAN-ID
+        -- table holds direct CAN IDs loaded straight from flash.
+        --
+        -- Zero corpus observations as of 2026-05-24 means we have no
+        -- empirical wire confirmation — but the chair-side firmware
+        -- evidence is strong (two independent module firmwares both
+        -- list this ID in the same encoding).
         t:add(pf.class, "BTMouse sentinel (0x7FA)")
-        t:add(pf.summary, "BTMouse-listened sentinel (chair posts internal event 1; semantic TBD)")
+        t:add(pf.summary, "BTMouse-listened sentinel (chair-firmware-family-wide; emitter unidentified, semantic TBD)")
         add_evidence(t, "Code",
-            "BTMouse MC9S12X CAN-ID literal table @ FW 0x56E0 entry 0 (BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §4)")
+            "BTMouse MC9S12X FW 0x56E0 entry 0 + LEDJSM HCS12 FW 0x57C8 (cross-firmware-verified literal CAN-ID table; BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §4, rnet-firmware commit dce1b296)")
         return "BTMSent"
     else
         t:add(pf.class, string.format("Unknown STD 0x%03X", cid))
