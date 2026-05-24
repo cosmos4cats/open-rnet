@@ -140,6 +140,133 @@ def test_expert_info_fires_on_unknown_sentinel_subtypes(edge_pcap_dir):
     )
 
 
+def test_bt_unlock_pattern_a_marker(edge_pcap_dir):
+    """Pattern A of the BTMouse two-frame unlock protocol: any extended
+    CAN frame whose ID's low 16 bits == 0x7E57. Primes the chair-side
+    buffer at RAM 0x329A/B/C with the W~ magic bytes. Fires a NOTE-
+    severity expert-info marker."""
+    proc = subprocess.run(
+        ["tshark", "-X", f"lua_script:{LUA}",
+         "-r", str(edge_pcap_dir["bt_unlock_pattern_a"]), "-V"],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert "BTMouse unlock-protocol Pattern A" in proc.stdout, (
+        "expected Pattern A marker; got:\n" + proc.stdout[:600]
+    )
+
+
+def test_bt_unlock_pattern_b_marker(edge_pcap_dir):
+    """Pattern B of the BTMouse two-frame unlock protocol: standard
+    CAN frame, ID's low byte == 0xA7, DLC=8, data bytes 1-7 zero
+    (byte 0 unconstrained per the PRIMARY_SOURCE doc's IDR3+DSR1-DSR7
+    register-list interpretation). Fires a NOTE-severity marker.
+
+    Negative case: standard 0x?A7 frame with non-zero data bytes 1-7
+    should NOT fire the marker."""
+    # Positive
+    proc = subprocess.run(
+        ["tshark", "-X", f"lua_script:{LUA}",
+         "-r", str(edge_pcap_dir["bt_unlock_pattern_b_canonical"]), "-V"],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert "BTMouse unlock-protocol Pattern B" in proc.stdout, (
+        "expected Pattern B marker; got:\n" + proc.stdout[:600]
+    )
+    # Negative — Pattern B candidate ID but non-zero data byte 3
+    proc = subprocess.run(
+        ["tshark", "-X", f"lua_script:{LUA}",
+         "-r", str(edge_pcap_dir["bt_unlock_pattern_b_nonzero_data"]), "-V"],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert "BTMouse unlock-protocol Pattern B" not in proc.stdout, (
+        "Pattern B marker fired on non-zero DSR1-DSR7 (false positive)"
+    )
+
+
+def test_bt_unlock_sequence_marker_fires_on_correlation(edge_pcap_dir):
+    """Cross-frame correlation: when Pattern B arrives within ~1s of a
+    recent Pattern A on the same bus, the dissector fires a WARN-
+    severity bt_unlock_sequence marker on the Pattern B frame in
+    addition to the per-frame Pattern A and Pattern B markers. This
+    is the actually-interesting case per the rnet-firmware docs."""
+    proc = subprocess.run(
+        ["tshark", "-X", f"lua_script:{LUA}",
+         "-r", str(edge_pcap_dir["bt_unlock_full_sequence"]), "-V"],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert "BTMouse unlock-protocol sequence" in proc.stdout, (
+        "expected sequence marker on Pattern B following recent "
+        "Pattern A; got:\n" + proc.stdout[:800]
+    )
+
+
+def test_bt_unlock_no_sequence_when_pattern_a_alone(edge_pcap_dir):
+    """Negative: Pattern A alone (without a following Pattern B) must
+    NOT fire the sequence marker. Same for Pattern B alone (without a
+    preceding Pattern A within the window)."""
+    proc = subprocess.run(
+        ["tshark", "-X", f"lua_script:{LUA}",
+         "-r", str(edge_pcap_dir["bt_unlock_pattern_a"]), "-V"],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert "BTMouse unlock-protocol sequence" not in proc.stdout, (
+        "sequence marker fired on Pattern A alone (false positive)"
+    )
+    proc = subprocess.run(
+        ["tshark", "-X", f"lua_script:{LUA}",
+         "-r", str(edge_pcap_dir["bt_unlock_pattern_b_canonical"]), "-V"],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert "BTMouse unlock-protocol sequence" not in proc.stdout, (
+        "sequence marker fired on Pattern B alone (false positive)"
+    )
+
+
+def test_programmer_presence_still_normal_after_revert(edge_pcap_dir):
+    """STD 0x07A0 DLC=0 should still decode as 'Programmer presence' —
+    confirming the earlier wrong 0x07A0-as-magic-trigger handler has
+    been reverted. Pattern B's actual trigger is any STD ID with low
+    byte 0xA7, not 0x07A0 (which has low byte 0xA0)."""
+    proc = subprocess.run(
+        ["tshark", "-X", f"lua_script:{LUA}",
+         "-r", str(edge_pcap_dir["programmer_presence_normal"]), "-V"],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert "Programmer presence" in proc.stdout, (
+        "expected normal Programmer-presence label on DLC=0 0x7A0; got:\n"
+        + proc.stdout[:600]
+    )
+    # And the old wrong marker name should never appear anywhere
+    assert "BT-pairing-unlock magic-frame CANDIDATE" not in proc.stdout, (
+        "old marker name still present — revert incomplete"
+    )
+
+
+def test_dormant_chair_listened_marker_fires(edge_pcap_dir):
+    """STD 0x001 is in BTMouse's chair-side literal CAN-ID table at
+    FW 0x56E0 but has 0 corpus observations. The dissector fires a
+    WARN-severity expert-info marker on these IDs (the dormant_chair_
+    listened set: 0x001, 0x00A, 0x0F0, 0x7C0, 0x7E0, 0x7E4, 0x7E8,
+    0x7EC). A wire frame on any of these means the user has captured
+    something the corpus has never seen — flagged loudly so it's not
+    missed."""
+    proc = subprocess.run(
+        ["tshark", "-X", f"lua_script:{LUA}",
+         "-r", str(edge_pcap_dir["dormant_chair_listened_001"]), "-V"],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert "Chair-listened (dormant)" in proc.stdout, (
+        "expected dormant-family label on STD 0x001; got:\n"
+        + proc.stdout[:600]
+    )
+    assert "first known wire observation" in proc.stdout, (
+        "expected 'first known wire observation' phrasing in label"
+    )
+    assert "please share" in proc.stdout, (
+        "expected 'please share' invitation in expert-info or summary"
+    )
+
+
 def test_synthetic_pcap_writer_self_check():
     """Sanity: the pcap writer itself should produce files tshark can
     parse as CAN. If this test fails, the synthetic-frame tests above

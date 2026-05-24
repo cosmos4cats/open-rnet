@@ -56,12 +56,13 @@ anyone can send us.
 - [R-Net, ReBus, POP — three names, three different things](#r-net-rebus-pop--three-names-three-different-things)
 - [POP frames — the structural decode](#pop-frames--the-structural-decode)
 - [What is decoded (with confidence)](#what-is-decoded-with-confidence)
-- [Coverage across full corpus (~433k CAN frames)](#coverage-across-full-corpus-433k-can-frames)
+- [Coverage across full corpus (~455k CAN frames)](#coverage-across-full-corpus-455k-can-frames)
 - [Independent corroboration during development](#independent-corroboration-during-development)
 - [Authentication and access control — the whole story](#authentication-and-access-control--the-whole-story)
 - [Reading the output — things that look weird but aren't bugs](#reading-the-output--things-that-look-weird-but-arent-bugs) — quirky labels explained
 - [Filters, recipes, and field reference](#filters-recipes-and-field-reference) — filter examples, **common investigations**, recommended Wireshark columns, complete `rnet.*` field catalog
 - [Known gaps](#known-gaps)
+- [Interesting frames worth sharing](#interesting-frames-worth-sharing) — "if you see this, please share" expert-info markers
 - [Planned: firmware-version-aware parameter lookup](#planned-firmware-version-aware-parameter-lookup)
 - [File layout](#file-layout)
 - [Related work](#related-work)
@@ -476,12 +477,12 @@ alongside the source citation when you want to verify a claim.
 
 #### Current distribution (as of 2026-05-24, post-audit)
 
-Across 57 evidence-tagged decode rules in the dissector:
+Across 58 evidence-tagged decode rules in the dissector:
 
 | Kind        | Count | %    |
 |-------------|------:|-----:|
-| Code        |    13 | 23%  |
-| Documented  |    36 | 63%  |
+| Code        |    14 | 24%  |
+| Documented  |    36 | 62%  |
 | Inferred    |     8 | 14%  |
 
 (Distribution shifted significantly on 2026-05-24 after a primary-source
@@ -714,14 +715,17 @@ primary truth.
 | 0x1C20 family | XTD `0x1C200X00` | adjacent to `0x1C0C/0x1C2C/0x1C30` |
 | Protocol-control sentinels (subtype 4-7) | XTD `0x1E84-0x1E87....` | parse capture audit; subtype semantics open |
 
-## Coverage across full corpus (~433k CAN frames)
+## Coverage across full corpus (~455k CAN frames)
 
-Includes 18 open-rnet captures + the 2026-05-21 hackathon dump.
+Includes 29 open-rnet captures + the 2026-05-21 hackathon dump
+(30 total). The 29 open-rnet captures span the original top-level set
+plus the `july19_2016/dual_joysticks/` (5), `july19_2016/led_jsm_revision06`,
+and `m300_powerup/` (3) subdirectories.
 
 | Category | Count | Percentage |
 |---|---|---|
-| Fully decoded, evidenced | 431,411 | **99.64%** |
-| Decoded, `[unverified]` | 1,552 | 0.36% |
+| Fully decoded, evidenced | 454,440 | **99.78%** |
+| Decoded, `[unverified]` | 1,017 | 0.22% |
 | Unknown frame class | **0** | **0.00%** |
 
 Every CAN frame in the corpus now has at least a class label. The
@@ -1375,6 +1379,34 @@ analysis/wireshark/
 - Later RE work on the Programmer dongle DLL and IRConfigurator
   companion app — surfaced the POP wire format, ODI class encoding,
   CRC algorithm, and parameter address layouts cited throughout.
+
+## Interesting frames worth sharing
+
+Some frames are interesting precisely because nobody has ever captured
+them. Chair-side firmware (BTMouse MC9S12X, LEDJSM HCS12) contains
+dispatch handlers for a small set of CAN IDs that **parse's entire
+30-capture corpus has zero observations of**. If you ever see one
+in your own captures, you've recorded something the dissector has
+never seen.
+
+The dissector flags these loudly in Wireshark's Expert Information
+panel (severity: Warning) so you can't miss them. The current
+"please share if you see this" set:
+
+| What | Pattern | Why it's interesting |
+|---|---|---|
+| **BT-pairing-unlock Pattern A (seed frame)** | Extended CAN frame, low 16 bits of ID == `0x7E57` (DLC and data unconstrained) | First frame of a TWO-frame unlock sequence per BTMouse handler `0xF50E`. The chair-side bit-shuffle leaves the magic bytes `0x57 0x7E 0x00` in the firmware's internal buffer at RAM `0x329A/B/C`. NOTE-severity marker on its own (the pattern could be incidental in some traffic) — pair with Pattern B below to see the full sequence. Per `BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md`. |
+| **BT-pairing-unlock Pattern B (trigger frame)** | Standard CAN frame, ID low byte == `0xA7` (so one of `0x0A7, 0x1A7, …, 0x7A7`), DLC=8, data bytes 1-7 zero | Second frame of the sequence — fires the unlock IF Pattern A primed the buffer recently AND the runtime flag at `0xFF4C4` is set (banked code decides this). NOTE-severity marker per-frame. |
+| **BT-pairing-unlock full sequence (Pattern A → Pattern B)** | Pattern B arrives within ~1s of a Pattern A on the same bus | The actually-interesting case. WARN-severity marker fires on the Pattern B frame. The handler then calls a banked function whose effect we can't statically see — likely BT pairing enable, factory test mode, or service-only parameter writes. |
+| **Dormant chair-listened STD CAN IDs** | STD `0x001`, `0x00A`, `0x0F0`, `0x7C0`, `0x7E0`, `0x7E4`, `0x7E8`, `0x7EC` | All appear in BTMouse's literal CAN-ID table at flash `0x56E0-0x571B` (cross-validated against LEDJSM HCS12 at flash `0x57C8+`) — the chair has acceptance-filter and/or dispatch entries ready to react. But none of these IDs has ever appeared in any of the 30 captures in parse's corpus. Likely candidates: factory/diagnostic frames, service-tool triggers, or planned-but-not-shipped variants. |
+| **0x1E8X session sentinel with subtype 1, 2, or 3** | XTD `0x1E810000`-`0x1E830000` (the rare subtypes) | Multi-source negative confirmation across 4 dealer-side binaries and the 30-capture corpus says these subtypes are deliberately unused (parse handles N=0 Transfer Complete and N=4-7 attach handshake — the rest were never seen). If a wire frame uses one, that means a chair module we don't have a primary source for. |
+
+If you capture any of these:
+1. Save the pcap/pcapng (or `candump -L` text log) — even a few minutes around the event is useful
+2. Note what you were doing on the chair when it happened (just powered up? entering a particular menu? after a Programmer session? during a BT pair attempt?)
+3. File an issue or share the capture with us — see "Contributing" below
+
+The dissector will tell you which kind it saw. In Wireshark, look for the **Warning-level Expert Info** items in the bottom-right status bar, or use the `Analyze → Expert Information` menu. In tshark, the markers appear in `-V` output alongside the frame.
 
 ## Contributing
 

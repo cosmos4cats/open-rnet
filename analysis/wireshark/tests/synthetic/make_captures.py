@@ -144,6 +144,50 @@ EDGE_CASES = {
     "rnet_unlock_frame": [
         {"id": 0x08280F02, "data": b"", "extended": True},
     ],
+    # BT-pairing-unlock two-frame protocol. Per
+    # rnet-firmware BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md, the chair-side
+    # handler at 0xF50E fires when Pattern A (extended frame, low 16
+    # bits of ID == 0x7E57) is followed by Pattern B (standard frame,
+    # low byte of ID == 0xA7, DLC=8, DSR1-DSR7 zero) within ~1s and
+    # the runtime flag at 0xFF4C4 is set.
+    #
+    # Pattern A alone:
+    "bt_unlock_pattern_a": [
+        # Extended frame, low 16 bits of ID == 0x7E57.
+        {"id": 0x00007E57, "data": b"\x11\x22\x33\x44",
+         "extended": True},
+    ],
+    # Pattern B alone (canonical: low byte 0xA7, DLC=8, DSR1-DSR7 zero,
+    # DSR0 arbitrary):
+    "bt_unlock_pattern_b_canonical": [
+        {"id": 0x4A7, "data": b"\x99" + b"\x00" * 7},
+    ],
+    # Pattern B with non-zero data byte 3 (DSR3) — should NOT fire
+    # the Pattern B marker because DSR1-DSR7 are not all zero.
+    "bt_unlock_pattern_b_nonzero_data": [
+        {"id": 0x4A7, "data": b"\x00\x00\x00\x55\x00\x00\x00\x00"},
+    ],
+    # Full unlock sequence: Pattern A immediately followed by
+    # Pattern B within the correlation window. The synthetic pcap
+    # writer places frames 1 ms apart by default, so the two frames
+    # are <1s apart and the sequence marker should fire on the
+    # Pattern B frame.
+    "bt_unlock_full_sequence": [
+        {"id": 0x00007E57, "data": b"", "extended": True},
+        {"id": 0x4A7, "data": b"\x00" * 8},
+    ],
+    # Normal 0x07A0 — Programmer presence (DLC=0). Used as a
+    # regression check that the wrong-CAN-ID magic-marker that
+    # previously fired on this frame has been reverted.
+    "programmer_presence_normal": [
+        {"id": 0x7A0, "data": b""},
+    ],
+    # Dormant chair-listened STD IDs. Each appears in BTMouse's literal
+    # CAN-ID table at FW 0x56E0-0x571B but has 0 corpus observations.
+    # Synthesize one to verify the dissector fires the dormant marker.
+    "dormant_chair_listened_001": [
+        {"id": 0x001, "data": b""},
+    ],
 }
 
 

@@ -234,15 +234,104 @@ local pe = {
     -- 0x1E8X sentinel with a subtype confirmed-unused on all dealer
     -- sources (N=1, 2, 3). Multi-source negative confirmation: zero
     -- literal hits in v5 DLL, v6 DLL, R-Net Programmer6 DLR.exe, and
-    -- LEDJSM HCS12 firmware; plus zero observations across 19-capture
+    -- LEDJSM HCS12 firmware; plus zero observations across 30-capture
     -- corpus. The marker fires if a wire frame ever uses one of these
     -- subtypes — that would mean a chair module we haven't seen.
     sentinel_unknown_subtype = ProtoExpert.new(
         "rnet.expert.sentinel_unknown_subtype",
         "0x1E8X session sentinel with subtype deliberately unused (N=1/2/3 confirmed-zero across 4 sources)",
         expert.group.UNDECODED, expert.severity.NOTE),
+
+    -- BT-pairing-unlock protocol — Pattern A (the SEED frame). An
+    -- extended CAN frame whose low 16 bits of ID == 0x7E57.
+    -- MSCAN_Rx_dispatch's extended path runs that ID through a
+    -- bit-shuffle that leaves bytes 0x57, 0x7E, 0x00 in the chair-
+    -- side firmware's internal buffer at RAM 0x329A/B/C. Those
+    -- residual bytes are part of what the unlock handler 0xF50E
+    -- checks when a subsequent Pattern B (trigger) frame arrives.
+    -- Per BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md (rnet-firmware
+    -- commit 94bcb5ef). DLC and data bytes are unconstrained for
+    -- Pattern A; ID bits 16-17 must be 0; top 11 bits are free.
+    -- Marked NOTE severity because if Pattern A's bit-pattern turns
+    -- out to be incidental in normal extended traffic, this would
+    -- be noisy.
+    bt_unlock_pattern_a = ProtoExpert.new(
+        "rnet.expert.bt_unlock_pattern_a",
+        "NOTABLE: extended CAN frame, low 16 bits == 0x7E57 — matches BTMouse unlock-protocol Pattern A (SEED); primes chair-side buffer with the W~ magic bytes",
+        expert.group.PROTOCOL, expert.severity.NOTE),
+
+    -- BT-pairing-unlock protocol — Pattern B (the TRIGGER frame). A
+    -- STANDARD CAN frame whose ID's low byte == 0xA7 (8 candidates:
+    -- 0x0A7, 0x1A7, 0x2A7, 0x3A7, 0x4A7, 0x5A7, 0x6A7, 0x7A7),
+    -- DLC=8, with the data-byte zero check applied. If the chair-
+    -- side buffer was recently primed by Pattern A AND the runtime
+    -- flag at 0xFF4C4 is set (banked code we can't see decides
+    -- this), handler 0xF50E fires the unlock — which calls a banked
+    -- function whose effect we don't know (speculated BT pairing
+    -- entry / service-mode unlock / factory mode).
+    --
+    -- *** ASSUMPTION + follow-up question for rnet-firmware: ***
+    -- BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §7 describes the
+    -- data-zero check as "IDR3 + DSR1-DSR7 == 0" — for a STANDARD
+    -- frame, IDR3 is unused, so that reads as "DSR1-DSR7 == 0"
+    -- (data bytes 1-7 zero; data byte 0 unconstrained). The newer
+    -- BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md instead says "all 8 data
+    -- bytes zero". The two docs disagree about whether DSR0 (data
+    -- byte 0) must also be zero. We implement the MORE PERMISSIVE
+    -- interpretation (DSR1-DSR7 == 0, byte 0 unconstrained) so the
+    -- marker fires on the broader set and doesn't miss real
+    -- matches. Q: which is the actual disassembly truth?
+    bt_unlock_pattern_b = ProtoExpert.new(
+        "rnet.expert.bt_unlock_pattern_b",
+        "NOTABLE: standard CAN frame, ID low byte == 0xA7, DLC=8, data bytes 1-7 zero — matches BTMouse unlock-protocol Pattern B (TRIGGER candidate); fires the unlock if recently primed by Pattern A + runtime flag set",
+        expert.group.PROTOCOL, expert.severity.NOTE),
+
+    -- BT-pairing-unlock protocol — the actual two-frame SEQUENCE
+    -- fired. Pattern A within ~1 second BEFORE Pattern B on the
+    -- same bus. This is the "extremely notable" case per the
+    -- rnet-firmware doc — even if Pattern A or Pattern B alone is
+    -- incidental, both within 1s of each other matches the chair-
+    -- side unlock sequence (modulo the runtime flag, which we can't
+    -- observe from the wire).
+    --
+    -- *** ASSUMPTION + follow-up question for rnet-firmware: ***
+    -- The 1-second correlation window is a guess. The chair-side
+    -- buffer at 0x329A/B/C presumably persists until the next
+    -- extended frame overwrites it. If there's no extended-frame
+    -- traffic in between, the W~ bytes could persist indefinitely.
+    -- Q: what other frame types/events clear 0x329A/B/C, and is the
+    -- effective correlation window longer than 1s in quiet buses?
+    bt_unlock_sequence = ProtoExpert.new(
+        "rnet.expert.bt_unlock_sequence",
+        "RARE+HIGH-INTEREST: BTMouse unlock-protocol sequence — Pattern B trigger arrived within ~1s of a Pattern A seed; this is the multi-step service/diagnostic unlock condition (modulo runtime flag at 0xFF4C4); please share this capture",
+        expert.group.PROTOCOL, expert.severity.WARN),
+
+    -- Dormant chair-listened CAN ID. The set {0x001, 0x00A, 0x0F0,
+    -- 0x7C0, 0x7E0, 0x7E4, 0x7E8, 0x7EC} appears in BTMouse's
+    -- literal CAN-ID table at FW 0x56E0-0x571B (cross-validated in
+    -- LEDJSM HCS12 firmware at FW 0x57C8+) — the chair has
+    -- acceptance-filter and/or dispatch entries ready to react to
+    -- these. But parse has ZERO corpus observations of any of them
+    -- across all 30 captures (cross-checked 2026-05-24). Per
+    -- BTMOUSE_SEMANTIC_LAYER.md §2.6 these are DORMANT — likely
+    -- factory/diagnostic frames, a planned-but-not-shipped variant,
+    -- or service-tool triggers that typical user flows don't
+    -- exercise. The marker fires loudly because if you see one,
+    -- you've captured something the dissector's corpus has never
+    -- seen and that the chair is deliberately listening for —
+    -- worth investigating and worth sharing back.
+    dormant_chair_listened = ProtoExpert.new(
+        "rnet.expert.dormant_chair_listened",
+        "RARE: STD ID is in BTMouse's chair-side listen table but has ZERO prior corpus observations — likely factory/diagnostic frame, please share this capture",
+        expert.group.PROTOCOL, expert.severity.WARN),
 }
-rnet.experts = {pe.sentinel_unknown_subtype}
+rnet.experts = {
+    pe.sentinel_unknown_subtype,
+    pe.bt_unlock_pattern_a,
+    pe.bt_unlock_pattern_b,
+    pe.bt_unlock_sequence,
+    pe.dormant_chair_listened,
+}
 
 -- User preference: show provenance info (evidence kind + source citation)
 -- for each frame. Off by default — most users running the dissector want to
@@ -422,6 +511,29 @@ local function _reset_session_state()
     _frame_session_state = {}
 end
 
+-- BT-pairing-unlock protocol cross-frame state. Pattern A (extended
+-- frame with low 16 bits == 0x7E57) primes a chair-side buffer; if
+-- Pattern B (standard ID low byte 0xA7, DLC=8, data check) arrives
+-- soon after, the unlock sequence fires (modulo a runtime flag we
+-- can't observe). Track the most-recent Pattern A timestamp + cache
+-- which Pattern B frames fired the sequence (for re-pass display).
+--
+-- *** ASSUMPTION + follow-up question for rnet-firmware: ***
+-- The 1.0-second correlation window is a guess. The chair-side
+-- buffer at 0x329A/B/C persists until overwritten by the next
+-- extended-frame's bit-shuffle. On a quiet bus that could be much
+-- longer than 1s; on a busy bus, much shorter. Q: what's the
+-- empirical persistence window, and what events besides "next
+-- extended frame" clear those buffer bytes?
+local _last_pattern_a_time = nil
+local _bt_unlock_sequence_frames = {}   -- [frame_no] = true if this Pattern B fired the sequence
+local _bt_unlock_correlation_window = 1.0   -- seconds
+
+local function _reset_bt_unlock_state()
+    _last_pattern_a_time = nil
+    _bt_unlock_sequence_frames = {}
+end
+
 local function _maybe_reset_state_full(pinfo)
     -- One-shot reset hook called from rnet.dissector for both Plan 2's
     -- binding state and Plan 1's session state.
@@ -429,6 +541,7 @@ local function _maybe_reset_state_full(pinfo)
         _active_pointer = {}
         _frame_binding = {}
         _reset_session_state()
+        _reset_bt_unlock_state()
     end
 end
 
@@ -1466,6 +1579,13 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         -- Programmer presence announcement. Sent by the Programmer when it
         -- joins the bus. Per frame-class glossary notes +
         -- open-rnet UPD_HUNT_AND_POP_FINDING.md.
+        --
+        -- (A previous version of this handler also checked for a
+        -- "BT-pairing-unlock magic frame" pattern on STD 0x07A0 +
+        -- DLC=8 + all-zero. That check was wrong — per
+        -- BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md the actual unlock TRIGGER
+        -- is a STANDARD frame whose ID's low byte is 0xA7, not the
+        -- specific ID 0x07A0; the matching handler now lives below.)
         t:add(pf.class, "Programmer presence")
         t:add(pf.summary, "Programmer presence announcement")
         add_evidence(t, "Documented", "frame-class glossary notes + UPD_HUNT_AND_POP_FINDING.md")
@@ -1575,6 +1695,26 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         add_evidence(t, "Code",
             "BTMouse MC9S12X MSCAN acceptance-filter table @ FW 0x56F2-0x5718 (BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §5; chair-side primary source)")
         return "CfgFam"
+    elseif cid == 0x001 or cid == 0x00A or cid == 0x0F0
+        or cid == 0x7C0 or cid == 0x7E0 or cid == 0x7E4
+        or cid == 0x7E8 or cid == 0x7EC then
+        -- Dormant chair-listened CAN ID. See pe.dormant_chair_listened
+        -- comment block. These IDs appear in BTMouse's literal CAN-ID
+        -- table at FW 0x56E0-0x571B (with cross-firmware verification
+        -- against LEDJSM @ FW 0x57C8+) but parse has zero corpus
+        -- observations across all 30 captures. Fire an expert-info
+        -- marker so anyone running the dissector against a capture
+        -- containing one of these IDs sees a loud "this is unusual,
+        -- please share" prompt in Wireshark's Expert Information panel.
+        local class_item = t:add(pf.class, string.format(
+            "Chair-listened (dormant) STD 0x%03X — first known wire observation!", cid))
+        t:add(pf.summary, string.format(
+            "STD 0x%03X — BTMouse/LEDJSM have dispatch entries for this ID but parse's 30-capture corpus has zero prior observations. If you're seeing this, you've captured something interesting (likely factory/diagnostic or a service-tool trigger) — please share.",
+            cid))
+        class_item:add_proto_expert_info(pe.dormant_chair_listened)
+        add_evidence(t, "Code",
+            "BTMouse MC9S12X literal CAN-ID table @ FW 0x56E0-0x571B + LEDJSM HCS12 FW 0x57C8+ (BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §4 + BTMOUSE_SEMANTIC_LAYER.md §2.6)")
+        return "Dormant"
     elseif cid == 0x7FA then
         -- BTMouse-listened sentinel. Listed in the chair-firmware-
         -- family literal CAN-ID table at BTMouse FW 0x56E0 (entry 0,
@@ -2078,7 +2218,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
             -- haven't seen — keep the expert-info marker for visibility.
             label = string.format("0x1E8X session sentinel (N=%d, deliberately unused)", subtype)
             summary = string.format("R-Net session sentinel N=%d tail=0x%04X (subtype confirmed-unused across 4 dealer sources)", subtype, tail)
-            conf, src = "Code", "4-source zero-confirm: v5 DLL + v6 DLL + DLR EXE + LEDJSM HCS12 + 19-capture corpus"
+            conf, src = "Code", "4-source zero-confirm: v5 DLL + v6 DLL + DLR EXE + LEDJSM HCS12 + 30-capture corpus"
         end
         local class_item = t:add(pf.class, label)
         t:add(pf.summary, summary)
@@ -2153,6 +2293,59 @@ function rnet.dissector(tvb, pinfo, tree)
         tag = decode_xtd(tvb, t, cid, is_rtr)
     else
         tag = decode_std(tvb, t, cid, is_rtr, pinfo)
+    end
+
+    -- BT-pairing-unlock protocol pattern detection. Per
+    -- BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md (rnet-firmware commit
+    -- 94bcb5ef). Runs after the regular decode so markers stack on
+    -- top of whatever class label the frame already has.
+    --
+    -- Pattern A: extended frame, low 16 bits of ID == 0x7E57.
+    -- Pattern B: standard frame, low byte of ID == 0xA7, DLC=8,
+    --   DSR1-DSR7 == 0 (data bytes 1-7 zero; see assumption
+    --   notes in the pe.bt_unlock_pattern_b comment block about
+    --   the DSR0 ambiguity).
+    --
+    -- Cross-frame correlation: if Pattern B arrives within
+    -- _bt_unlock_correlation_window seconds of a recent Pattern A,
+    -- raise the bt_unlock_sequence marker on the Pattern B frame.
+    -- First-pass: record into _bt_unlock_sequence_frames; re-pass:
+    -- read from that table so display filters don't flicker.
+    if is_xtd and bit.band(cid, 0xFFFF) == 0x7E57 then
+        t:add_proto_expert_info(pe.bt_unlock_pattern_a)
+        if pinfo and not pinfo.visited and pinfo.rel_ts then
+            _last_pattern_a_time = pinfo.rel_ts
+        end
+    elseif (not is_xtd)
+        and bit.band(cid, 0xFF) == 0xA7
+        and tvb:len() == 8
+    then
+        -- DSR1-DSR7 == 0 (data bytes 1-7; byte 0 unconstrained per
+        -- PRIMARY_SOURCE §7's IDR3+DSR1-DSR7 interpretation).
+        local data_check_pass = true
+        for i = 1, 7 do
+            if tvb(i,1):uint() ~= 0 then data_check_pass = false; break end
+        end
+        if data_check_pass then
+            t:add_proto_expert_info(pe.bt_unlock_pattern_b)
+            -- Cross-frame correlation
+            local fired = false
+            if pinfo and not pinfo.visited then
+                if pinfo.rel_ts and _last_pattern_a_time
+                   and (pinfo.rel_ts - _last_pattern_a_time)
+                       <= _bt_unlock_correlation_window
+                then
+                    fired = true
+                    _bt_unlock_sequence_frames[pinfo.number] = true
+                end
+            else
+                -- Re-pass: read cached decision
+                fired = _bt_unlock_sequence_frames[pinfo.number] == true
+            end
+            if fired then
+                t:add_proto_expert_info(pe.bt_unlock_sequence)
+            end
+        end
     end
 
     pinfo.cols.protocol = "R-Net"
