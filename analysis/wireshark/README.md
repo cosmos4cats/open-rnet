@@ -46,6 +46,26 @@ honest about that uncertainty so you can decide what to trust.
 (or a correct-but-better one) are the single highest-leverage thing
 anyone can send us.
 
+## Contents
+
+- [Quick start (no install)](#quick-start-no-install)
+- [Installation](#installation)
+- [Usage](#usage) — basic filters, `rnet-dump`, Info column, capture formats
+- [Evidence policy](#evidence-policy) — Code / Documented / Inferred tiers
+- [R-Net, ReBus, POP — three names, three different things](#r-net-rebus-pop--three-names-three-different-things)
+- [POP frames — the structural decode](#pop-frames--the-structural-decode)
+- [What is decoded (with confidence)](#what-is-decoded-with-confidence)
+- [Coverage across full corpus (~433k CAN frames)](#coverage-across-full-corpus-433k-can-frames)
+- [Independent corroboration during development](#independent-corroboration-during-development)
+- [Authentication and access control — the whole story](#authentication-and-access-control--the-whole-story)
+- [Reading the output — things that look weird but aren't bugs](#reading-the-output--things-that-look-weird-but-arent-bugs) — quirky labels explained
+- [Filters, recipes, and field reference](#filters-recipes-and-field-reference) — filter examples, **common investigations**, recommended Wireshark columns, complete `rnet.*` field catalog
+- [Known gaps](#known-gaps)
+- [Planned: firmware-version-aware parameter lookup](#planned-firmware-version-aware-parameter-lookup)
+- [File layout](#file-layout)
+- [Related work](#related-work)
+- [Contributing](#contributing)
+
 ## Quick start (no install)
 
 From the repo root, against the hackathon capture that ships with this
@@ -110,7 +130,10 @@ Wireshark.
 ### Filter on dissected fields
 
 The dissector adds an `rnet.*` field namespace. Every field shown in
-the expanded frame detail is filterable:
+the expanded frame detail is filterable. A few quick examples here;
+the **complete field reference + common-investigation recipes** are
+under [`Field reference`](#field-reference) and
+[`Common investigations`](#common-investigations) below.
 
 ```sh
 tshark -r captures/2026_AT_hackathon.log -Y "rnet.joy.x > 30"
@@ -736,6 +759,13 @@ others cover a handful (rare faults). The README's separate
 most of its rules are Documented or Inferred, because the few Code-
 tier rules cover the bulk of the wire traffic.
 
+## Filters, recipes, and field reference
+
+What the dissector lets you ask of a capture: quick-reference filter
+examples, task-oriented recipes, recommended columns for at-a-glance
+scanning, and the complete catalog of `rnet.*` fields the dissector
+emits.
+
 ### Filter quick reference
 
 The most useful display filters that aren't immediately obvious:
@@ -772,6 +802,83 @@ The most useful display filters that aren't immediately obvious:
 (`rnet.confidence` requires the `rnet.show_evidence:TRUE` preference;
 the others work always.)
 
+### Common investigations
+
+Task-oriented recipes that combine multiple filters to answer real
+questions about a capture. Adapt the capture path to your file.
+
+**"Was the chair reporting any fault during this capture?"**
+
+```sh
+tshark -r capture.pcapng -Y 'rnet.err.fault' \
+       -T fields -e frame.time_relative -e rnet.slot \
+                 -e rnet.err.code -e rnet.err.name
+```
+
+Filters to status/error frames where the code is non-zero; columns
+out the slot, hex code, and decoded name.
+
+**"Did a parameter write succeed?"** (chair-side acked + CRC OK)
+
+```sh
+tshark -r capture.pcapng \
+       -Y 'rnet.pop.binds_param_name == "BackUp"' \
+       -T fields -e frame.number -e rnet.session_state \
+                 -e rnet.transfer_id -e rnet.pop.value16
+# Then check for the matching Transfer Complete:
+tshark -r capture.pcapng -Y 'rnet.transfer_id == N && rnet.pop.crc_value'
+```
+
+Plan 2's POINTER→DATA binding means every DATA frame is tagged with
+the parameter it's accessing. Pair with `rnet.pop.crc_value` to
+confirm the transfer ended cleanly.
+
+**"What network / chair is this capture from?"**
+
+```sh
+tshark -r capture.pcapng -Y 'rnet.auth.network' \
+       -T fields -e rnet.auth.network | sort -u
+tshark -r capture.pcapng -Y 'rnet.dime' \
+       -T fields -e rnet.slot -e rnet.dime | sort -u
+```
+
+XOR-table identification plus DIME serial enumeration tells you the
+network's identity and which modules are on the bus.
+
+**"Trace the dealer-Programmer attach session"**
+
+```sh
+tshark -r capture.pcapng \
+       -Y 'rnet.class contains "R-Net attach" || rnet.class contains "Transfer Complete"'
+```
+
+Surfaces the 4-frame chair-attach handshake + every transfer end.
+Use `rnet.session_state` to see the CXTN state per frame.
+
+**"What's the dissector unsure about in this capture?"**
+
+```sh
+# First enable evidence display, then filter on Inferred-tier decodes:
+tshark -o rnet.show_evidence:TRUE -r capture.pcapng \
+       -Y 'rnet.confidence == "Inferred"' \
+       -T fields -e rnet.class | sort -u
+```
+
+Surfaces all family-analogy / hackathon-only decodes — useful for
+deciding what's safe to act on and what to investigate further.
+
+**"Reconstruct the chair's wall clock from RTC frames"**
+
+```sh
+tshark -r capture.pcapng -Y 'rnet.rtc.year' \
+       -T fields -e frame.time_relative \
+                 -e rnet.rtc.year -e rnet.rtc.month -e rnet.rtc.day \
+                 -e rnet.rtc.hour -e rnet.rtc.min -e rnet.rtc.sec \
+       | head
+```
+
+The 0x1C2C0X00 frames broadcast the chair's clock at ~1Hz.
+
 ### Recommended Wireshark columns
 
 The dissector populates a rich set of fields. For at-a-glance reading
@@ -781,7 +888,7 @@ Columns → New, choose `Custom`, paste the field name):
 | Column title | Field                       | Why useful                            |
 |---|---|---|
 | Network      | `rnet.auth.network`         | Surfaces "Table A/B/D" when auth validates    |
-| Reg          | `rnet.pop.reg_name`         | POINTER / DATA / TEXT / PAGE0 at a glance     |
+| Reg          | `rnet.pop.register_name`    | POINTER / DATA / TEXT / PAGE0 at a glance     |
 | Param        | `rnet.pop.binds_param_name` | Parameter the DATA frame is writing/reading   |
 | State        | `rnet.session_state`        | CXTN_RNET / UPLOAD / DOWNLOAD                 |
 | Xfer         | `rnet.transfer_id`          | Which POP transfer episode this frame is in   |
@@ -791,6 +898,126 @@ The default `Info` column already carries the per-frame summary so
 you don't need to add anything to get a usable view — these columns
 make scanning long captures faster by surfacing specific fields in
 dedicated slots.
+
+### Field reference
+
+Complete list of `rnet.*` fields the dissector emits, grouped by
+purpose. All are usable as display filters (`-Y 'rnet.foo'`) and as
+column fields (paste the name into the Columns preferences dialog).
+
+#### Universal — present on every R-Net frame
+
+| Field | Type | What it is |
+|---|---|---|
+| `rnet.class` | string | Frame class label (e.g. "PM heartbeat", "POP (standard-ID)") |
+| `rnet.summary` | string | Human-readable summary line (mirrored into the Info column) |
+| `rnet.slot` | uint8 | Device slot nibble (0=PM, 1=JSM, 2=IOM/ISM, etc.) |
+
+#### Session state — every frame in an R-Net conversation
+
+| Field | Type | What it is |
+|---|---|---|
+| `rnet.session_state` | string | CXTN_NONE / CXTN_CAN / CXTN_RNET / CXTN_UPLOAD / CXTN_DOWNLOAD |
+| `rnet.transfer_id` | uint32 | POP transfer episode counter (increments per UPLOAD/DOWNLOAD) |
+
+#### POP application protocol (`rnet.pop.*`)
+
+| Field | Type | What it is |
+|---|---|---|
+| `rnet.pop.tc` | uint8 | Transfer code: 0/1 = segment, 2 = complete-side, 3 = abort |
+| `rnet.pop.tc_str` | string | TC name ("Segment indicator 0" / "Abort" / ...) |
+| `rnet.pop.quick` | bool | Quick (single-frame) flag |
+| `rnet.pop.crc` | bool | CRC flag (bit 4 of data[0]) |
+| `rnet.pop.this_node` / `.other_node` | uint8 | Source / destination slot nibbles |
+| `rnet.pop.this_node_str` / `.other_node_str` | string | Slot names |
+| `rnet.pop.register_name` | string | Register: POINTER / DATA / TEXT / PAGE0 |
+| `rnet.pop.odi` | uint32 | 24-bit Object Data Identifier |
+| `rnet.pop.odi_class` | string | ODI class (ODI_CLASS_SLOT etc.) |
+| `rnet.pop.odi_address` | uint16 | Address within class |
+| `rnet.pop.pointer_param_id` | uint16 | Permobil PWC param ID derived as (sub<<8)\|idx |
+| `rnet.pop.param_name` | string | Resolved param name (PWC registry) |
+| `rnet.pop.addr_name` / `.addr_prefix` / `.addr_path` | string | `.rnd` address-table name, stable-module prefix, GUI menu path |
+| `rnet.pop.binds_param_id` / `.binds_param_name` | uint32 / string | Param this DATA frame writes/reads (from prior POINTER setup) |
+| `rnet.pop.binds_pointer_frame` | framenum | Frame number of the POINTER setup that bound this DATA |
+| `rnet.pop.value16` / `.value32` | uint | Bytes 4-5 LE u16 / bytes 4-7 LE u32 (raw value) |
+| `rnet.pop.crc_value` | uint16 | CRC echo embedded in COMPLETE responses |
+| `rnet.pop.segment` | uint16 | Segment number in POP-ext segmented transfers |
+| `rnet.pop.size` | uint32 | Size field on segmented-transfer setup frames |
+| `rnet.pop.is_abort` | bool | True when TC=3 (abort frame) |
+| `rnet.pop.label` | string | Legacy opcode name (OPEN/REQUEST/ACK/COMPLETE/...) when recognized |
+
+#### Auth handshake (`rnet.auth.*`)
+
+| Field | Type | What it is |
+|---|---|---|
+| `rnet.auth.seq` | uint8 | 0..7 position in the 8-frame auth round |
+| `rnet.auth.slot` | uint8 | Slot whose serial byte is being asserted |
+| `rnet.auth.key` | uint8 | XOR-table key for this seq position |
+| `rnet.auth.value` | uint8 | Responding module's serial byte at seq (or 0 on RTR challenge) |
+| `rnet.auth.valid` | bool | Key matched a known XOR network table |
+| `rnet.auth.network` | string | Identified network name ("Table A: ..." etc.) when valid |
+
+#### Joystick / motor / drive
+
+| Field | Type | What it is |
+|---|---|---|
+| `rnet.joy.x` / `.joy.y` | int8 | Joystick X/Y (-128..127, signed) |
+| `rnet.motor.left` / `.right` | uint16 | Motor power LE u16 per side |
+| `rnet.motor.en_l` / `.en_r` | uint8 | Motor enable byte per side |
+| `rnet.speed.percent` | uint8 | Speed setting % |
+| `rnet.horn.state` | string | Horn on/off |
+| `rnet.dist.left` / `.right` | uint32 | Wheel encoder counts LE u32 per side |
+
+#### Battery, lights, indicators
+
+| Field | Type | What it is |
+|---|---|---|
+| `rnet.batt.percent` | uint8 | Battery level % |
+| `rnet.lights.bitmap` | uint8 | Indicator bitmap byte (raw) |
+| `rnet.lights.left` / `.right` / `.hazard` / `.flood` | bool | Individual indicator-bit booleans |
+
+#### RTC broadcast (`rnet.rtc.*`)
+
+| Field | Type | What it is |
+|---|---|---|
+| `rnet.rtc.year` | uint8 | Years since 2000 (add 2000) |
+| `rnet.rtc.month` / `.day` | uint8 | Calendar date |
+| `rnet.rtc.dow` | uint8 | Day-of-week (1=Mon..7=Sun) |
+| `rnet.rtc.hour` / `.min` / `.sec` | uint8 | Wall-clock time |
+
+#### Mode configuration (`rnet.mode.*`)
+
+| Field | Type | What it is |
+|---|---|---|
+| `rnet.mode.index` | uint8 | Mode index 0-5 |
+| `rnet.mode.subaddr` | uint8 | Sub-address |
+| `rnet.mode.type` / `.type_str` | uint8 / string | Data type byte + decoded name |
+
+#### Faults (`rnet.err.*`)
+
+| Field | Type | What it is |
+|---|---|---|
+| `rnet.err.code` | uint16 | BE u16 error code (non-zero = fault active) |
+| `rnet.err.name` | string | Decoded error name from catalog |
+| `rnet.err.fault` | bool | True iff code != 0 |
+
+#### Module identity
+
+| Field | Type | What it is |
+|---|---|---|
+| `rnet.dime` | string | Decoded DIME serial (LLYYMMNNNN format) |
+| `rnet.serial` | bytes | Raw 4-byte serial from STD 0x00E heartbeat |
+| `rnet.jsm_hb.valid` | bool | JSM 87×7 heartbeat signature matched |
+| `rnet.pm_hb.byte0` | uint8 | Per-slot heartbeat byte 0 (encodes TC + emitter slot) |
+
+#### Audit + provenance (`rnet.confidence`, `rnet.evidence`)
+
+Only emitted when the `rnet.show_evidence` preference is enabled.
+
+| Field | Type | What it is |
+|---|---|---|
+| `rnet.confidence` | string | Evidence kind: Code / Documented / Inferred |
+| `rnet.evidence` | string | Source citation |
 
 ## Known gaps
 
