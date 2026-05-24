@@ -1686,6 +1686,19 @@ local function decode_xtd(tvb, t, cid, is_rtr)
     elseif bit.band(cid, 0xFFFFF0F0) == 0x1C240000 then
         local slot = bit.band(bit.rshift(cid, 8), 0xF)
         local state = (bit.band(cid, 0xF) == 0x01) and "ready" or "power down"
+        -- Special case: slot 0xF state=01 (CAN ID 0x1C240F01) is the
+        -- Programmer's keep-awake heartbeat, not a generic device-state
+        -- frame. CFTDIInterface::ResetSleepTimer @ DongleInterface.dll:
+        -- 0x100053e0 sends this on USB activity, rate-limited to once
+        -- per 10 seconds, to prevent the chair from going to sleep
+        -- while the dealer Programmer is connected.
+        if slot == 0xF and state == "ready" then
+            t:add(pf.class, "Programmer keep-awake heartbeat")
+            t:add(pf.slot, slot)
+            t:add(pf.summary, "Programmer-active keep-awake (1Hz max, prevents chair sleep)")
+            add_evidence(t, "Code", "DongleInterface.dll CFTDIInterface::ResetSleepTimer @ 0x100053e0")
+            return "PrgKeep"
+        end
         t:add(pf.class, "Device state")
         t:add(pf.slot, slot)
         t:add(pf.summary, string.format("Device slot=%X %s", slot, state))

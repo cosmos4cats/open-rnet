@@ -38,7 +38,7 @@ traffic we can reproduce, empirical cross-checks against multiple
 captures. Others are educated guesses from patterns and adjacent
 neighbors. The `rnet.confidence` field (see "Evidence policy" below)
 tells you which is which on a per-rule basis. Today the rules break
-down as **53% Code, 28% Documented, 19% Inferred** — we try to be
+down as **54% Code, 28% Documented, 18% Inferred** — we try to be
 honest about that uncertainty so you can decide what to trust.
 
 **If you can help, especially with new capture logs, please do.** See
@@ -268,9 +268,9 @@ Across 55 evidence-tagged decode rules in the dissector:
 
 | Kind        | Count | %    |
 |-------------|------:|-----:|
-| Code        |    28 | 53%  |
+| Code        |    29 | 54%  |
 | Documented  |    15 | 28%  |
-| Inferred    |    10 | 19%  |
+| Inferred    |    10 | 18%  |
 
 These percentages move as research progresses — `Inferred` entries
 tend to become `Documented` or `Code` over time when a wire capture
@@ -643,7 +643,7 @@ that pref is enabled).
 The headline coverage number counts frames, not decode rules. Some
 decode rules cover many thousands of frames (joystick, heartbeats),
 others cover a handful (rare faults). The README's separate
-**53% Code / 28% Documented / 19% Inferred** distribution counts
+**54% Code / 28% Documented / 18% Inferred** distribution counts
 **rules**, not frames. A capture can be 99% evidenced even though
 most of its rules are Documented or Inferred, because the few Code-
 tier rules cover the bulk of the wire traffic.
