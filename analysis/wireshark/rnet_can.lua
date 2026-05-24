@@ -699,8 +699,16 @@ local function decode_distance(tvb, t, cid)
     t:add(pf.class, "Distance counter")
     t:add(pf.slot, slot)
     if tvb:len() >= 8 then
+        local left  = tvb(0,4):le_uint()
+        local right = tvb(4,4):le_uint()
         t:add_le(pf.dist_left,  tvb(0,4))
         t:add_le(pf.dist_right, tvb(4,4))
+        t:add(pf.summary, string.format(
+            "Distance slot=%X  L=%d  R=%d  (left/right wheel encoder counts, LE u32)",
+            slot, left, right))
+    else
+        t:add(pf.summary, string.format(
+            "Distance slot=%X  (truncated, DLC<8)", slot))
     end
     add_evidence(t, "Code", "rnet_utils.py:415")
     return "Dist"
@@ -711,8 +719,15 @@ local function decode_motor_enable(tvb, t, cid)
     t:add(pf.class, "Motor enable")
     t:add(pf.slot, slot)
     if tvb:len() >= 2 then
+        local l = tvb(0,1):uint()
+        local r = tvb(1,1):uint()
         t:add(pf.motor_en_l, tvb(0,1))
         t:add(pf.motor_en_r, tvb(1,1))
+        t:add(pf.summary, string.format(
+            "Motor enable slot=%X  L=0x%02X  R=0x%02X", slot, l, r))
+    else
+        t:add(pf.summary, string.format(
+            "Motor enable slot=%X  (truncated, DLC<2)", slot))
     end
     add_evidence(t, "Code", "rnet_utils.py:430")
     return "MotEn"
@@ -1288,26 +1303,31 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         -- (alternate) / Seen during JSM init". Not in runnable decoder.
         local desc = is_rtr and "PM sleep all (alternate)" or "Seen during JSM init"
         t:add(pf.class, desc .. " [unverified]")
+        t:add(pf.summary, desc .. " (STD 0x002, payload-less signaling) [unverified]")
         add_evidence(t, "Inferred", "frame_dict §1 family-analogy")
         return "Sleep2"
     elseif cid == 0x004 then
         -- [unverified] dictionary §1
         local desc = is_rtr and "Sleep/wake sequence" or "JSM sleep commencing"
         t:add(pf.class, desc .. " [unverified]")
+        t:add(pf.summary, desc .. " (STD 0x004, payload-less signaling) [unverified]")
         add_evidence(t, "Inferred", "frame_dict §1 family-analogy")
         return "Sleep4"
     elseif cid == 0x00C then
         t:add(pf.class, "Network test")
+        t:add(pf.summary, "Network test (STD 0x00C, periodic bus-presence probe)")
         add_evidence(t, "Code", "rnet_utils.py:273")
         return "NetTest"
     elseif cid == 0x00E then
         return decode_serial_heartbeat(tvb, t)
     elseif cid == 0x040 then
         t:add(pf.class, "Open parameter page")
+        t:add(pf.summary, "Open parameter page (STD 0x040, programmer→bus signaling)")
         add_evidence(t, "Code", "rnet_utils.py:279")
         return "OpenParam"
     elseif cid == 0x041 then
         t:add(pf.class, "Close parameter page")
+        t:add(pf.summary, "Close parameter page (STD 0x041, programmer→bus signaling)")
         add_evidence(t, "Code", "rnet_utils.py:281")
         return "CloseParam"
     elseif cid == 0x050 then
@@ -1393,14 +1413,21 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         return "ProgHere"
     elseif cid == 0x7B0 then
         t:add(pf.class, "Config mode 0")
+        t:add(pf.summary, "Config mode 0 (STD 0x7B0, configuration-mode signaling)")
         add_evidence(t, "Code", "rnet_utils.py:303")
         return "Cfg0"
     elseif cid == 0x7B1 then
         t:add(pf.class, "Config mode 1")
+        t:add(pf.summary, "Config mode 1 (STD 0x7B1, configuration-mode signaling)")
         add_evidence(t, "Code", "rnet_utils.py:305")
         return "Cfg1"
     elseif cid == 0x7B3 then
         t:add(pf.class, is_rtr and "Serial exchange request" or "Serial exchange")
+        if is_rtr then
+            t:add(pf.summary, "Serial exchange request (STD 0x7B3 RTR, chair-side enum trigger)")
+        else
+            t:add(pf.summary, "Serial exchange (STD 0x7B3, chair-side enum response)")
+        end
         add_evidence(t, "Code", "rnet_utils.py:307")
         return "SerExch"
     elseif cid >= 0x040 and cid <= 0x04F then
