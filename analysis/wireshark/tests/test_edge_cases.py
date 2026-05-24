@@ -156,14 +156,19 @@ def test_bt_unlock_pattern_a_marker(edge_pcap_dir):
 
 
 def test_bt_unlock_pattern_b_marker(edge_pcap_dir):
-    """Pattern B of the BTMouse two-frame unlock protocol: standard
-    CAN frame, ID's low byte == 0xA7, DLC=8, data bytes 1-7 zero
-    (byte 0 unconstrained per the PRIMARY_SOURCE doc's IDR3+DSR1-DSR7
-    register-list interpretation). Fires a NOTE-severity marker.
+    """Pattern B of the BTMouse two-frame unlock protocol — per the
+    datasheet-verified rnet-firmware update (commit f4197494):
+    STANDARD CAN frame, ID == 0x07A0 EXACTLY, DLC=8, ALL 8 data
+    bytes zero. Fires a NOTE-severity marker. The frame's class
+    label is also re-flagged from the default "Programmer presence"
+    to "Pattern B trigger" so the per-frame summary is honest about
+    the magic-pattern match.
 
-    Negative case: standard 0x?A7 frame with non-zero data bytes 1-7
-    should NOT fire the marker."""
-    # Positive
+    Negative cases: same ID but non-zero data, OR a different ID
+    with low byte 0xA7, must NOT fire the marker (the wrong
+    8-candidate interpretation is regression-guarded by the second
+    negative)."""
+    # Positive — 0x7A0 + DLC=8 + all-zero
     proc = subprocess.run(
         ["tshark", "-X", f"lua_script:{LUA}",
          "-r", str(edge_pcap_dir["bt_unlock_pattern_b_canonical"]), "-V"],
@@ -172,14 +177,47 @@ def test_bt_unlock_pattern_b_marker(edge_pcap_dir):
     assert "BTMouse unlock-protocol Pattern B" in proc.stdout, (
         "expected Pattern B marker; got:\n" + proc.stdout[:600]
     )
-    # Negative — Pattern B candidate ID but non-zero data byte 3
+    assert "BTMouse unlock-protocol Pattern B trigger" in proc.stdout, (
+        "expected class label distinguishing this from normal Programmer "
+        "presence; got:\n" + proc.stdout[:600]
+    )
+    # Negative — 0x7A0 + DLC=8 but non-zero data byte 3
     proc = subprocess.run(
         ["tshark", "-X", f"lua_script:{LUA}",
          "-r", str(edge_pcap_dir["bt_unlock_pattern_b_nonzero_data"]), "-V"],
         capture_output=True, text=True, timeout=15,
     )
     assert "BTMouse unlock-protocol Pattern B" not in proc.stdout, (
-        "Pattern B marker fired on non-zero DSR1-DSR7 (false positive)"
+        "Pattern B marker fired on non-zero data (false positive — "
+        "all 8 data bytes must be zero per datasheet-verified spec)"
+    )
+    # Negative — wrong ID (low byte 0xA7 but not 0x07A0).
+    # Regression guard against the earlier 8-candidate interpretation.
+    proc = subprocess.run(
+        ["tshark", "-X", f"lua_script:{LUA}",
+         "-r", str(edge_pcap_dir["bt_unlock_pattern_b_wrong_id"]), "-V"],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert "BTMouse unlock-protocol Pattern B" not in proc.stdout, (
+        "Pattern B marker fired on STD 0x4A7 (false positive — "
+        "datasheet-verified spec narrows trigger to 0x07A0 only)"
+    )
+
+
+def test_bt_unlock_pattern_a_tightened_mask(edge_pcap_dir):
+    """Pattern A's mask was tightened from (id & 0xFFFF) == 0x7E57
+    to (id & 0x3FFFF) == 0x07E57 in the datasheet-verified update
+    (rnet-firmware commit f4197494). The added bits 17:16 == 0
+    constraint must reject IDs that match the old (looser) mask but
+    not the new (tighter) mask — e.g. an ID with bit 17 set."""
+    proc = subprocess.run(
+        ["tshark", "-X", f"lua_script:{LUA}",
+         "-r", str(edge_pcap_dir["bt_unlock_pattern_a_bit17_set"]), "-V"],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert "BTMouse unlock-protocol Pattern A" not in proc.stdout, (
+        "Pattern A marker fired on ID 0x00027E57 (bit 17 set; "
+        "should be rejected by tightened 0x3FFFF mask)"
     )
 
 
@@ -222,11 +260,13 @@ def test_bt_unlock_no_sequence_when_pattern_a_alone(edge_pcap_dir):
     )
 
 
-def test_programmer_presence_still_normal_after_revert(edge_pcap_dir):
-    """STD 0x07A0 DLC=0 should still decode as 'Programmer presence' —
-    confirming the earlier wrong 0x07A0-as-magic-trigger handler has
-    been reverted. Pattern B's actual trigger is any STD ID with low
-    byte 0xA7, not 0x07A0 (which has low byte 0xA0)."""
+def test_programmer_presence_normal_dlc0(edge_pcap_dir):
+    """STD 0x07A0 with DLC=0 is the normal Programmer-presence
+    announcement and should NOT fire the Pattern B trigger marker
+    (which requires DLC=8 + all-zero). Per the datasheet-verified
+    rnet-firmware update, 0x07A0 has dual semantics: DLC=0 is
+    Programmer presence; DLC=8+all-zero is the unlock-protocol
+    Pattern B trigger."""
     proc = subprocess.run(
         ["tshark", "-X", f"lua_script:{LUA}",
          "-r", str(edge_pcap_dir["programmer_presence_normal"]), "-V"],
@@ -236,9 +276,9 @@ def test_programmer_presence_still_normal_after_revert(edge_pcap_dir):
         "expected normal Programmer-presence label on DLC=0 0x7A0; got:\n"
         + proc.stdout[:600]
     )
-    # And the old wrong marker name should never appear anywhere
-    assert "BT-pairing-unlock magic-frame CANDIDATE" not in proc.stdout, (
-        "old marker name still present — revert incomplete"
+    assert "BTMouse unlock-protocol Pattern B" not in proc.stdout, (
+        "Pattern B marker fired on normal DLC=0 Programmer presence "
+        "(false positive — Pattern B requires DLC=8)"
     )
 
 

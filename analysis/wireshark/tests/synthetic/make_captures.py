@@ -210,27 +210,42 @@ EDGE_CASES = {
         {"id": 0x08280F02, "data": b"", "extended": True},
     ],
     # BT-pairing-unlock two-frame protocol. Per
-    # rnet-firmware BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md, the chair-side
-    # handler at 0xF50E fires when Pattern A (extended frame, low 16
-    # bits of ID == 0x7E57) is followed by Pattern B (standard frame,
-    # low byte of ID == 0xA7, DLC=8, DSR1-DSR7 zero) within ~1s and
-    # the runtime flag at 0xFF4C4 is set.
+    # rnet-firmware BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md (datasheet-
+    # verified update, commit f4197494), the chair-side handler at
+    # 0xF50E fires when Pattern A (extended frame, (id & 0x3FFFF)
+    # == 0x07E57) is followed by Pattern B (STD frame, ID == 0x7A0
+    # EXACTLY, DLC=8, ALL 8 data bytes zero) within ~1s and the
+    # runtime flag at 0xFF4C4 is set.
     #
     # Pattern A alone:
     "bt_unlock_pattern_a": [
-        # Extended frame, low 16 bits of ID == 0x7E57.
+        # Extended frame, (id & 0x3FFFF) == 0x07E57. The simplest
+        # example has the top 11 bits as zero.
         {"id": 0x00007E57, "data": b"\x11\x22\x33\x44",
          "extended": True},
     ],
-    # Pattern B alone (canonical: low byte 0xA7, DLC=8, DSR1-DSR7 zero,
-    # DSR0 arbitrary):
-    "bt_unlock_pattern_b_canonical": [
-        {"id": 0x4A7, "data": b"\x99" + b"\x00" * 7},
+    # Pattern A with bit 17 set — should NOT match because the
+    # tightened mask 0x3FFFF requires bits 17:16 = 0.
+    "bt_unlock_pattern_a_bit17_set": [
+        # 0x00027E57 = 0x07E57 OR (1<<17) — fails the tightened mask
+        {"id": 0x00027E57, "data": b"\x11\x22\x33\x44",
+         "extended": True},
     ],
-    # Pattern B with non-zero data byte 3 (DSR3) — should NOT fire
-    # the Pattern B marker because DSR1-DSR7 are not all zero.
+    # Pattern B alone (canonical: ID 0x7A0 exactly, DLC=8, ALL 8
+    # data bytes zero):
+    "bt_unlock_pattern_b_canonical": [
+        {"id": 0x7A0, "data": b"\x00" * 8},
+    ],
+    # Pattern B with non-zero data byte 3 — should NOT fire the
+    # Pattern B marker because all 8 data bytes must be zero.
     "bt_unlock_pattern_b_nonzero_data": [
-        {"id": 0x4A7, "data": b"\x00\x00\x00\x55\x00\x00\x00\x00"},
+        {"id": 0x7A0, "data": b"\x00\x00\x00\x55\x00\x00\x00\x00"},
+    ],
+    # Pattern B-ish with WRONG ID (low byte 0xA7 but not 0x07A0).
+    # Should NOT fire the marker — the earlier 8-candidate
+    # interpretation was wrong; only 0x07A0 matches.
+    "bt_unlock_pattern_b_wrong_id": [
+        {"id": 0x4A7, "data": b"\x00" * 8},
     ],
     # Full unlock sequence: Pattern A immediately followed by
     # Pattern B within the correlation window. The synthetic pcap
@@ -239,7 +254,7 @@ EDGE_CASES = {
     # Pattern B frame.
     "bt_unlock_full_sequence": [
         {"id": 0x00007E57, "data": b"", "extended": True},
-        {"id": 0x4A7, "data": b"\x00" * 8},
+        {"id": 0x7A0, "data": b"\x00" * 8},
     ],
     # Normal 0x07A0 — Programmer presence (DLC=0). Used as a
     # regression check that the wrong-CAN-ID magic-marker that

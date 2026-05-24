@@ -243,47 +243,49 @@ local pe = {
         expert.group.UNDECODED, expert.severity.NOTE),
 
     -- BT-pairing-unlock protocol — Pattern A (the SEED frame). An
-    -- extended CAN frame whose low 16 bits of ID == 0x7E57.
-    -- MSCAN_Rx_dispatch's extended path runs that ID through a
-    -- bit-shuffle that leaves bytes 0x57, 0x7E, 0x00 in the chair-
-    -- side firmware's internal buffer at RAM 0x329A/B/C. Those
-    -- residual bytes are part of what the unlock handler 0xF50E
-    -- checks when a subsequent Pattern B (trigger) frame arrives.
-    -- Per BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md (rnet-firmware
-    -- commit 94bcb5ef). DLC and data bytes are unconstrained for
-    -- Pattern A; ID bits 16-17 must be 0; top 11 bits are free.
-    -- Marked NOTE severity because if Pattern A's bit-pattern turns
-    -- out to be incidental in normal extended traffic, this would
-    -- be noisy.
+    -- extended CAN frame where (id & 0x3FFFF) == 0x07E57 — i.e. low
+    -- 18 bits of ID match 0x07E57, requiring bits 17:16 == 0 in
+    -- addition to the low 16 bits == 0x7E57 constraint. Top 11 bits
+    -- (28:18) are unconstrained. MSCAN_Rx_dispatch's extended path
+    -- runs the ID through a bit-shuffle that leaves bytes 0x57,
+    -- 0x7E, 0x00 in the chair-side firmware's internal buffer at
+    -- RAM 0x329A/B/C. Those residual bytes are part of what the
+    -- unlock handler 0xF50E checks when a subsequent Pattern B
+    -- (trigger) frame arrives. Per
+    -- BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md (rnet-firmware datasheet-
+    -- verified update, commit f4197494). DLC and data bytes are
+    -- unconstrained for Pattern A. Marked NOTE severity because if
+    -- Pattern A's bit-pattern turns out to be incidental in normal
+    -- extended traffic, this would be noisy.
     bt_unlock_pattern_a = ProtoExpert.new(
         "rnet.expert.bt_unlock_pattern_a",
-        "NOTABLE: extended CAN frame, low 16 bits == 0x7E57 — matches BTMouse unlock-protocol Pattern A (SEED); primes chair-side buffer with the W~ magic bytes",
+        "NOTABLE: extended CAN frame, (id & 0x3FFFF) == 0x07E57 — matches BTMouse unlock-protocol Pattern A (SEED); primes chair-side buffer with the W~ magic bytes",
         expert.group.PROTOCOL, expert.severity.NOTE),
 
-    -- BT-pairing-unlock protocol — Pattern B (the TRIGGER frame). A
-    -- STANDARD CAN frame whose ID's low byte == 0xA7 (8 candidates:
-    -- 0x0A7, 0x1A7, 0x2A7, 0x3A7, 0x4A7, 0x5A7, 0x6A7, 0x7A7),
-    -- DLC=8, with the data-byte zero check applied. If the chair-
-    -- side buffer was recently primed by Pattern A AND the runtime
-    -- flag at 0xFF4C4 is set (banked code we can't see decides
-    -- this), handler 0xF50E fires the unlock — which calls a banked
-    -- function whose effect we don't know (speculated BT pairing
-    -- entry / service-mode unlock / factory mode).
+    -- BT-pairing-unlock protocol — Pattern B (the TRIGGER frame).
+    -- STANDARD CAN frame, ID == 0x7A0 EXACTLY, DLC=8, all 8 data
+    -- bytes zero. Per rnet-firmware commit f4197494 (datasheet-
+    -- verified via HCS12 S12CPUV2 Reference Manual): FUN_00430E's
+    -- bit-shuffle for standard frames reconstructs the 11-bit CAN
+    -- ID into the X register (X high = ID[10:8], X low = ID[7:0]).
+    -- The magic check requires X = 0x07A0 after `& 7` mask on X
+    -- high — which uniquely matches CAN ID 0x7A0 (and ONLY 0x7A0;
+    -- a previous interpretation listed 8 candidates with low byte
+    -- 0xA7 based on a partial decode, but the full LEAX D,X
+    -- analysis tightens that to one specific ID).
     --
-    -- *** ASSUMPTION + follow-up question for rnet-firmware: ***
-    -- BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §7 describes the
-    -- data-zero check as "IDR3 + DSR1-DSR7 == 0" — for a STANDARD
-    -- frame, IDR3 is unused, so that reads as "DSR1-DSR7 == 0"
-    -- (data bytes 1-7 zero; data byte 0 unconstrained). The newer
-    -- BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md instead says "all 8 data
-    -- bytes zero". The two docs disagree about whether DSR0 (data
-    -- byte 0) must also be zero. We implement the MORE PERMISSIVE
-    -- interpretation (DSR1-DSR7 == 0, byte 0 unconstrained) so the
-    -- marker fires on the broader set and doesn't miss real
-    -- matches. Q: which is the actual disassembly truth?
+    -- If the chair-side buffer was recently primed by Pattern A
+    -- AND the runtime flag at 0xFF4C4 is set (banked code we can't
+    -- see decides this), handler 0xF50E fires the unlock — which
+    -- calls a banked function whose effect we don't know
+    -- (speculated BT pairing entry / service-mode unlock / factory
+    -- mode). All 8 data bytes are required to be zero per the
+    -- datasheet-verified disassembly — earlier docs disagreed
+    -- about whether DSR0 was constrained; the resolution is YES
+    -- it is.
     bt_unlock_pattern_b = ProtoExpert.new(
         "rnet.expert.bt_unlock_pattern_b",
-        "NOTABLE: standard CAN frame, ID low byte == 0xA7, DLC=8, data bytes 1-7 zero — matches BTMouse unlock-protocol Pattern B (TRIGGER candidate); fires the unlock if recently primed by Pattern A + runtime flag set",
+        "NOTABLE: standard CAN frame, ID == 0x07A0 exactly, DLC=8, all 8 data bytes zero — matches BTMouse unlock-protocol Pattern B (TRIGGER); fires the unlock if recently primed by Pattern A + runtime flag set",
         expert.group.PROTOCOL, expert.severity.NOTE),
 
     -- BT-pairing-unlock protocol — the actual two-frame SEQUENCE
@@ -1576,16 +1578,35 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         -- POP standard-ID frame (any of 0x780..0x79F).
         return decode_pop_std(tvb, t, cid, pinfo)
     elseif cid == 0x7A0 then
-        -- Programmer presence announcement. Sent by the Programmer when it
-        -- joins the bus. Per frame-class glossary notes +
-        -- open-rnet UPD_HUNT_AND_POP_FINDING.md.
+        -- Normal case: Programmer presence announcement (DLC=0).
+        -- Sent by the Programmer when it joins the bus. Per
+        -- frame-class glossary notes + open-rnet
+        -- UPD_HUNT_AND_POP_FINDING.md.
         --
-        -- (A previous version of this handler also checked for a
-        -- "BT-pairing-unlock magic frame" pattern on STD 0x07A0 +
-        -- DLC=8 + all-zero. That check was wrong — per
-        -- BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md the actual unlock TRIGGER
-        -- is a STANDARD frame whose ID's low byte is 0xA7, not the
-        -- specific ID 0x07A0; the matching handler now lives below.)
+        -- Datasheet-verified rare case (per rnet-firmware commit
+        -- f4197494): STD 0x07A0 + DLC=8 + all-zero is the actual
+        -- Pattern B trigger of the BTMouse unlock protocol. The
+        -- main BT-unlock pattern detection runs after this handler
+        -- and attaches the expert-info marker; we surface the
+        -- distinct class label here so the per-frame summary is
+        -- accurate. (A previous interpretation thought the trigger
+        -- was "any STD ID with low byte 0xA7"; the datasheet read
+        -- of FUN_00430E narrowed it to 0x07A0 exactly.)
+        if tvb:len() == 8 then
+            local all_zero = true
+            for i = 0, 7 do
+                if tvb(i,1):uint() ~= 0 then all_zero = false; break end
+            end
+            if all_zero then
+                t:add(pf.class,
+                    "0x07A0 DLC=8 all-zero — BTMouse unlock-protocol Pattern B trigger")
+                t:add(pf.summary,
+                    "BTMouse unlock-protocol Pattern B (TRIGGER) — fires the chair-side unlock if a Pattern A seed was sent recently AND runtime flag 0xFF4C4 is set")
+                add_evidence(t, "Code",
+                    "BTMouse MC9S12X handler 0xF50E + datasheet-verified FUN_00430E LEAX D,X disassembly (BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md / rnet-firmware commit f4197494)")
+                return "BTUnlockB"
+            end
+        end
         t:add(pf.class, "Programmer presence")
         t:add(pf.summary, "Programmer presence announcement")
         add_evidence(t, "Documented", "frame-class glossary notes + UPD_HUNT_AND_POP_FINDING.md")
@@ -2296,34 +2317,34 @@ function rnet.dissector(tvb, pinfo, tree)
     end
 
     -- BT-pairing-unlock protocol pattern detection. Per
-    -- BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md (rnet-firmware commit
-    -- 94bcb5ef). Runs after the regular decode so markers stack on
-    -- top of whatever class label the frame already has.
+    -- BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md (rnet-firmware datasheet-
+    -- verified update, commit f4197494). Runs after the regular
+    -- decode so markers stack on top of whatever class label the
+    -- frame already has.
     --
-    -- Pattern A: extended frame, low 16 bits of ID == 0x7E57.
-    -- Pattern B: standard frame, low byte of ID == 0xA7, DLC=8,
-    --   DSR1-DSR7 == 0 (data bytes 1-7 zero; see assumption
-    --   notes in the pe.bt_unlock_pattern_b comment block about
-    --   the DSR0 ambiguity).
+    -- Pattern A: extended frame, (id & 0x3FFFF) == 0x07E57 — i.e.
+    --   low 18 bits match (low 16 bits == 0x7E57 AND bits 17:16
+    --   == 0). Top 11 bits unconstrained.
+    -- Pattern B: standard frame, ID == 0x7A0 EXACTLY, DLC == 8,
+    --   ALL 8 data bytes zero. Uniquely-derived from the datasheet-
+    --   verified disassembly of FUN_00430E (LEAX D,X reconstructs
+    --   the 11-bit ID into X register; magic check requires X ==
+    --   0x07A0 which corresponds to CAN ID 0x07A0 only).
     --
     -- Cross-frame correlation: if Pattern B arrives within
     -- _bt_unlock_correlation_window seconds of a recent Pattern A,
     -- raise the bt_unlock_sequence marker on the Pattern B frame.
     -- First-pass: record into _bt_unlock_sequence_frames; re-pass:
     -- read from that table so display filters don't flicker.
-    if is_xtd and bit.band(cid, 0xFFFF) == 0x7E57 then
+    if is_xtd and bit.band(cid, 0x3FFFF) == 0x07E57 then
         t:add_proto_expert_info(pe.bt_unlock_pattern_a)
         if pinfo and not pinfo.visited and pinfo.rel_ts then
             _last_pattern_a_time = pinfo.rel_ts
         end
-    elseif (not is_xtd)
-        and bit.band(cid, 0xFF) == 0xA7
-        and tvb:len() == 8
-    then
-        -- DSR1-DSR7 == 0 (data bytes 1-7; byte 0 unconstrained per
-        -- PRIMARY_SOURCE §7's IDR3+DSR1-DSR7 interpretation).
+    elseif (not is_xtd) and cid == 0x7A0 and tvb:len() == 8 then
+        -- All 8 data bytes zero
         local data_check_pass = true
-        for i = 1, 7 do
+        for i = 0, 7 do
             if tvb(i,1):uint() ~= 0 then data_check_pass = false; break end
         end
         if data_check_pass then

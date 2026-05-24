@@ -11,7 +11,18 @@ all 7 received definitive answers and are integrated.
 
 ---
 
-## Q1 — Pattern B data-byte check: DSR0 included or not?
+## Q1 — Pattern B data-byte check: DSR0 included or not?  ✅ ANSWERED
+
+**Resolution (rnet-firmware commit f4197494, T59 datasheet-verified):**
+The full 8 data bytes (DSR0-DSR7) must all be zero. The
+PRIMARY_SOURCE doc's "IDR3 + DSR1-DSR7" reading was a partial-
+disassembly artifact; the datasheet-verified disassembly of
+FUN_00430E + the unlock handler's magic check confirms all 8 data
+bytes are required to be zero.
+
+Parse updated to all-8-bytes-zero per the answered spec.
+
+### Original question
 
 Two rnet-firmware docs disagree about which data bytes the chair-side
 unlock handler at `0xF50E` requires to be zero:
@@ -62,7 +73,16 @@ extended frame** overwrites them via the bit-shuffle.
 
 ---
 
-## Q3 — Pattern A: complete set of seed-frame IDs?
+## Q3 — Pattern A: complete set of seed-frame IDs?  ✅ ANSWERED (TIGHTENED)
+
+**Resolution (rnet-firmware commit f4197494):** Pattern A was
+tightened from `(can_id & 0xFFFF) == 0x7E57` to `(can_id & 0x3FFFF)
+== 0x07E57` — the additional bits 17:16 == 0 constraint comes from
+the precise bit-shuffle math. Top 11 bits remain unconstrained.
+
+Parse updated to the tightened mask.
+
+### Original question
 
 The doc derives Pattern A as "extended CAN frame, low 16 bits of ID ==
 `0x7E57`" from the bit-shuffle formulas:
@@ -88,7 +108,21 @@ the doc states.
 
 ---
 
-## Q4 — Pattern B: are all 8 candidate IDs actually reachable?
+## Q4 — Pattern B: are all 8 candidate IDs actually reachable?  ✅ ANSWERED (NARROWED to 1)
+
+**Resolution (rnet-firmware commit f4197494, T59 datasheet-verified
+via HCS12 S12CPUV2 Reference Manual):** the full disassembly of
+FUN_00430E (specifically the `LEAX D,X` instruction at firmware
+0x432E — which an earlier intermediate pass mis-decoded as LEAY)
+reconstructs the full 11-bit CAN ID into the X register. The magic
+check requires X == 0x07A0 after `& 7` mask on X high, which
+uniquely corresponds to CAN ID 0x07A0. The 8-candidate set was an
+artifact of the partial-disassembly pass; the actual reachable
+trigger is exactly 0x07A0.
+
+Parse narrowed Pattern B to `cid == 0x7A0` exactly.
+
+### Original question
 
 The doc lists 8 candidate Pattern B IDs `{0x0A7, 0x1A7, 0x2A7, 0x3A7,
 0x4A7, 0x5A7, 0x6A7, 0x7A7}` derived from a PARTIAL decode of
