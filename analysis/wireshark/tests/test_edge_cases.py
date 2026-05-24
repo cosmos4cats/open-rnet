@@ -125,7 +125,7 @@ def test_expert_info_fires_on_unknown_sentinel_subtypes(edge_pcap_dir):
          "-r", str(edge_pcap_dir["sentinel_subtype_1"]), "-V"],
         capture_output=True, text=True, timeout=15,
     )
-    assert "session sentinel with subtype not yet documented" in proc.stdout, (
+    assert "session sentinel with subtype deliberately unused" in proc.stdout, (
         "expected expert-info marker on N=1 sentinel; got:\n" + proc.stdout[:600]
     )
     # Negative: subtype 0 (Transfer Complete) should NOT trigger it
@@ -134,7 +134,7 @@ def test_expert_info_fires_on_unknown_sentinel_subtypes(edge_pcap_dir):
          "-r", str(edge_pcap_dir["transfer_complete_non_programmer"]), "-V"],
         capture_output=True, text=True, timeout=15,
     )
-    assert "session sentinel with subtype not yet documented" not in proc.stdout, (
+    assert "session sentinel with subtype deliberately unused" not in proc.stdout, (
         "marker should NOT fire on N=0 (Transfer Complete); got expert info "
         "anyway"
     )

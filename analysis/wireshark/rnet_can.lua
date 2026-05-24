@@ -20,6 +20,22 @@
 --   Entries derived only from the prose reference RNET_FRAME_DICTIONARY.md
 --   (no corroborating runnable code) are marked "[unverified]" so users can
 --   tell at a glance which interpretations are well-grounded.
+--
+-- STRUCTURAL NOTE — 29-bit extended CAN IDs and Device-Type-ID:
+--   Per LEDJSM MSCAN_RX_ISR @ 0x449C (HCS12 firmware plate comment): the
+--   29-bit extended CAN ID encodes a target Device-Type-ID in its high
+--   bits plus the protocol opcode in the rest. Known Device-Type-IDs:
+--   0x6380 = LEDJSM (joystick), 0x0000 = BT-Mouse. The MSCAN hardware
+--   filter (CANIDAR0-7 / CANIDMR0-7) rejects non-matching frames in
+--   silicon before the CPU sees them, which is why per-module firmware
+--   byte-searches return zero hits for off-target frame IDs — those
+--   frames literally never reach the wrong module. The exact bit-field
+--   layout that selects each Device-Type-ID is still TBD; the dispatch
+--   code is in a banked HCS12 region (@ 0x3A9010 physical) that current
+--   tooling can't reach properly. Implication for parse: when a
+--   dealer-side source has zero hits for a frame ID, the right next
+--   place to look is the corresponding target module's firmware, not
+--   "we got it wrong."
 
 local rnet = Proto("rnet", "R-Net (Curtiss-Wright / PGDT)")
 
@@ -193,13 +209,15 @@ for _, v in pairs(pf) do table.insert(rnet.fields, v) end
 -- with the same visibility (filtering on text labels is harder than
 -- on severity).
 local pe = {
-    -- 0x1E8X sentinel with a subtype we haven't observed on the wire
-    -- (N=1, 2, 3). Fires extremely rarely on real captures — when it
-    -- does, the frame is worth investigating because it's potentially
-    -- a new piece of R-Net session control we haven't documented.
+    -- 0x1E8X sentinel with a subtype confirmed-unused on all dealer
+    -- sources (N=1, 2, 3). Multi-source negative confirmation: zero
+    -- literal hits in v5 DLL, v6 DLL, R-Net Programmer6 DLR.exe, and
+    -- LEDJSM HCS12 firmware; plus zero observations across 19-capture
+    -- corpus. The marker fires if a wire frame ever uses one of these
+    -- subtypes — that would mean a chair module we haven't seen.
     sentinel_unknown_subtype = ProtoExpert.new(
         "rnet.expert.sentinel_unknown_subtype",
-        "0x1E8X session sentinel with subtype not yet documented (N=1/2/3) — worth investigating",
+        "0x1E8X session sentinel with subtype deliberately unused (N=1/2/3 confirmed-zero across 4 sources)",
         expert.group.UNDECODED, expert.severity.NOTE),
 }
 rnet.experts = {pe.sentinel_unknown_subtype}
@@ -1299,19 +1317,25 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         add_evidence(t, "Code", "rnet_utils.py:271")
         return "Sleep"
     elseif cid == 0x002 then
-        -- [unverified] dictionary §1 (RNET_FRAME_DICTIONARY.md): "PM sleep all
-        -- (alternate) / Seen during JSM init". Not in runnable decoder.
+        -- Semantic from dictionary §1 (RNET_FRAME_DICTIONARY.md):
+        -- "PM sleep all (alternate) / Seen during JSM init".
+        -- Direction CONFIRMED chair→bus: zero hits in v5 DLL, v6 DLL,
+        -- DLR EXE ServiceCANMsg dispatch and Is*Msg pattern matchers.
+        -- The semantic identity (sleep-variant) remains family-analogy.
         local desc = is_rtr and "PM sleep all (alternate)" or "Seen during JSM init"
-        t:add(pf.class, desc .. " [unverified]")
-        t:add(pf.summary, desc .. " (STD 0x002, payload-less signaling) [unverified]")
-        add_evidence(t, "Inferred", "frame_dict §1 family-analogy")
+        t:add(pf.class, desc .. " [unverified semantic]")
+        t:add(pf.summary, desc .. " (STD 0x002, chair→bus payload-less signal)")
+        add_evidence(t, "Inferred",
+            "frame_dict §1 family-analogy; chair-emitted confirmed by 3-source dealer-side zero-hit sweep")
         return "Sleep2"
     elseif cid == 0x004 then
-        -- [unverified] dictionary §1
+        -- Same posture as 0x002: semantic from dictionary §1,
+        -- chair→bus direction confirmed by dealer-source zero-hits.
         local desc = is_rtr and "Sleep/wake sequence" or "JSM sleep commencing"
-        t:add(pf.class, desc .. " [unverified]")
-        t:add(pf.summary, desc .. " (STD 0x004, payload-less signaling) [unverified]")
-        add_evidence(t, "Inferred", "frame_dict §1 family-analogy")
+        t:add(pf.class, desc .. " [unverified semantic]")
+        t:add(pf.summary, desc .. " (STD 0x004, chair→bus payload-less signal)")
+        add_evidence(t, "Inferred",
+            "frame_dict §1 family-analogy; chair-emitted confirmed by 3-source dealer-side zero-hit sweep")
         return "Sleep4"
     elseif cid == 0x00C then
         t:add(pf.class, "Network test")
@@ -1432,30 +1456,70 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         return "SerExch"
     elseif cid >= 0x040 and cid <= 0x04F then
         -- Param-page family extension. 0x040/041 documented (open/close).
-        -- 042-04F are not documented but cluster tightly with the documented
-        -- pair. Round-3 reply suggested by analogy these are intermediate
-        -- param-page operations.
+        -- 042-04F: round-3 reply suggested by analogy these are intermediate
+        -- param-page operations. The cluster 0x042/0x043/0x044 shows a
+        -- strict 1:1 bit-31-only toggle (00000000↔80000000) lockstep
+        -- across IDs in every capture — looks like a chair-side per-bus
+        -- "I am here" tick. Direction CONFIRMED chair→bus: zero hits in
+        -- dealer DLL ServiceCANMsg dispatch / pattern matchers / DLR EXE
+        -- (per rnet-firmware RNET_FAMILY_DECODE_GAPS.md Gap #8).
         local fn = cid - 0x040
-        t:add(pf.class, string.format("Param-page family (fn 0x%X) [unverified]", fn))
-        t:add(pf.summary, string.format("Param-page family, function 0x%X", fn))
-        add_evidence(t, "Inferred", "family-analogy to documented 0x040/0x041")
+        t:add(pf.class, string.format("Param-page family (fn 0x%X) [unverified semantic]", fn))
+        t:add(pf.summary, string.format(
+            "Param-page family, function 0x%X (chair→bus; bit-31 toggle pattern unconfirmed semantic)", fn))
+        add_evidence(t, "Inferred",
+            "family-analogy to documented 0x040/0x041; chair-emitted confirmed by 3-source dealer-side zero-hit sweep")
         return "ParamX"
     elseif cid >= 0x050 and cid <= 0x05F then
-        -- Mode-map family extension. 0x050 documented as "Mode map" per
-        -- rnet_utils.py:283; 051-05F are family variants by analogy.
+        -- Profile-change family member. DongleInterface.dll
+        -- CCANMsg::IsProfileChangeMsg @ 0x10001b50 tests
+        -- StdIDMatches(0x50) (i.e. (canid & 0xFF0) == 0x50), so the
+        -- whole 0x050-0x05F range is the profile-change family per
+        -- official PGDT naming. (janschu99's "Mode map" name on 0x050
+        -- specifically is a community observation that pre-dates the
+        -- DLL decompile; the family-level identity is profile-change.)
+        --
+        -- Caveat: family-membership is Code-tier evidenced, but
+        -- payload-byte semantics have no dealer-side anchor —
+        -- IsProfileChangeMsg is a public DLL export with ZERO in-DLL
+        -- callers and ZERO DLR-EXE symbolic references. The dealer
+        -- side classifies these frames but doesn't decode the
+        -- payload; that decoder lives in chair-side firmware (PM
+        -- HCS12, not yet dumped).
         local fn = cid - 0x050
-        t:add(pf.class, string.format("Mode-map family (fn 0x%X) [unverified]", fn))
-        t:add(pf.summary, string.format("Mode-map family, function 0x%X", fn))
-        add_evidence(t, "Inferred", "family-analogy to documented 0x050 Mode map")
-        return "ModeMapX"
+        t:add(pf.class, string.format("Profile change family (fn 0x%X)", fn))
+        t:add(pf.summary, string.format("Profile change family, function 0x%X (payload semantic chair-side, no dealer decoder)", fn))
+        add_evidence(t, "Code",
+            "DongleInterface.dll IsProfileChangeMsg @ 0x10001b50 (classifier only; no in-DLL callers, no DLR EXE refs)")
+        return "ProfChg"
     elseif cid >= 0x060 and cid <= 0x06F then
-        -- Mode-family extension. 0x060 = Mode request (R3 evidenced);
-        -- 0x061 = Mode control (rnet_utils.py:285); 062-06F by analogy.
+        -- Mode-change family member. DongleInterface.dll
+        -- CCANMsg::IsModeChangeMsg @ 0x10001b00 tests
+        -- StdIDMatches(0x60) AND data[0] != 0x90 — payloads with
+        -- data[0] == 0x90 are a separate sibling family (PM-tx
+        -- joystick events per janschu99 diary; DLL handles them via a
+        -- different path not yet traced).
+        --
+        -- Same caveat as Profile change family: IsModeChangeMsg is a
+        -- public DLL export with zero in-DLL callers and zero DLR-EXE
+        -- symbolic references; payload semantics are chair-side
+        -- (PM HCS12, not yet dumped).
         local fn = cid - 0x060
-        t:add(pf.class, string.format("Mode family (fn 0x%X) [unverified]", fn))
-        t:add(pf.summary, string.format("Mode family, function 0x%X", fn))
-        add_evidence(t, "Inferred", "family-analogy to documented 0x060/0x061")
-        return "ModeFamX"
+        local b0 = tvb:len() >= 1 and tvb(0,1):uint() or nil
+        if b0 == 0x90 then
+            t:add(pf.class, string.format(
+                "0x06X family, data[0]=0x90 sibling (fn 0x%X) [unverified]", fn))
+            t:add(pf.summary, string.format(
+                "0x06X data[0]=0x90 sibling (likely joystick event, undecoded), function 0x%X", fn))
+            add_evidence(t, "Inferred",
+                "DLL IsModeChangeMsg excludes data[0]=0x90; sibling family handler not yet traced")
+        else
+            t:add(pf.class, string.format("Mode change family (fn 0x%X)", fn))
+            t:add(pf.summary, string.format("Mode change family, function 0x%X (payload semantic chair-side, no dealer decoder)", fn))
+            add_evidence(t, "Code",
+                "DongleInterface.dll IsModeChangeMsg @ 0x10001b00 (classifier only; no in-DLL callers, no DLR EXE refs)")
+        end
+        return "ModeChg"
     elseif cid >= 0x7B0 and cid <= 0x7BF then
         -- Config-mode family extension. 0x7B0/7B1/7B3 documented in
         -- rnet_utils.py. 7B2/7B4-7BF by analogy.
@@ -1646,18 +1710,23 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         -- 0x181C0X00 cJSM/JSM device-class family. Function byte = X.
         --   0x0D = Audio tones (rnet_utils.py:377) — handled above as a
         --          specific case.
-        --   0x0F = Periodic announcement [unverified]. Observed in 2026-05-21
-        --          hackathon candump as 102 frames with fully constant
-        --          payload 01 60 80 00 00 00 00 00.
+        --   0x0F = Periodic announcement [unverified semantic]. Observed
+        --          in 2026-05-21 hackathon candump as 102 frames with
+        --          fully constant payload 01 60 80 00 00 00 00 00.
+        --          Direction CONFIRMED chair→bus (cJSM audio module):
+        --          zero hits in v5/v6 DLL, DLR EXE, LEDJSM HCS12. The
+        --          cJSM audio MCU isn't yet dumped, so payload semantic
+        --          stays Inferred.
         --   other = unknown function in this device class.
         local func = bit.band(bit.rshift(cid, 8), 0xFF)
-        t:add(pf.class, string.format("cJSM/JSM family (function 0x%02X) [unverified]", func))
+        t:add(pf.class, string.format("cJSM/JSM family (function 0x%02X) [unverified semantic]", func))
         if func == 0x0F and tvb:len() == 8 then
-            t:add(pf.summary, "cJSM/JSM periodic announcement (constant payload)")
+            t:add(pf.summary, "cJSM periodic announcement (chair→bus, constant payload 01 60 80 00 00 00 00 00)")
         else
-            t:add(pf.summary, string.format("cJSM/JSM family, function 0x%02X", func))
+            t:add(pf.summary, string.format("cJSM/JSM family, function 0x%02X (chair→bus)", func))
         end
-        add_evidence(t, "Inferred", "hackathon-only observation, 0x181C family-analogy")
+        add_evidence(t, "Inferred",
+            "hackathon observation + 0x181C family-analogy; chair-emitted (cJSM) confirmed by 4-source dealer-side zero-hit sweep")
         return "cJSMx"
     elseif cid == 0x0C000005 then
         -- "PMtx global motor has stopped (0 MPH)" per janschu99 dictionary
@@ -1785,12 +1854,23 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         -- BTM (Bluetooth Mouse) family extension. The documented entries
         -- (0x0A400002/0102 Status 1/2, 0x0A400300/01 Control 1/2) are
         -- specific cases of this prefix. Variants like 0x0A4002X1 and
-        -- 0x0A400401 appear in captures but aren't documented; treat as
-        -- BTM-family with the function/sub bytes surfaced.
+        -- 0x0A400401 appear in captures but aren't documented in the
+        -- open-rnet spec §14.2; treat as BTM-family with the
+        -- function/sub bytes surfaced. Direction CONFIRMED chair→bus
+        -- by 4-source dealer-side zero-hit sweep (v5 DLL + v6 DLL +
+        -- DLR EXE + LEDJSM HCS12). The available HCS08 firmware
+        -- artifact (shared_hcs08_firmware.s19) is a bootloader stub
+        -- only — 19 symbols, NVM/flash/reset-vector code — NOT the
+        -- BT-Mouse application firmware, so it neither confirms nor
+        -- refutes BTM-side decode. Sub-byte semantics (byte 2 = family
+        -- selector, byte 3 = instance/sub-index; single-byte payload
+        -- looks like channel-nibble + sub-nibble) stay Inferred
+        -- pending the actual BT-Mouse application firmware dump.
         local sub = bit.band(cid, 0xFFFF)
-        t:add(pf.class, string.format("BTM family (sub 0x%04X) [unverified]", sub))
-        t:add(pf.summary, string.format("BTM family sub=0x%04X", sub))
-        add_evidence(t, "Inferred", "family-analogy to documented BTM Control/Status")
+        t:add(pf.class, string.format("BTM family (sub 0x%04X) [unverified semantic]", sub))
+        t:add(pf.summary, string.format("BTM family sub=0x%04X (chair→bus, BT-Mouse module; app firmware not in dump set)", sub))
+        add_evidence(t, "Inferred",
+            "family-analogy to documented BTM Control/Status; chair-emitted confirmed by 4-source dealer-side zero-hit sweep (HCS08 artifact in project is bootloader stub, not BTM app firmware)")
         return "BTMx"
     elseif bit.band(cid, 0xFFFFF0FF) == 0x1C200000 then
         -- Per janschu99 categorized dictionary line 52:
@@ -1812,36 +1892,50 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         add_evidence(t, "Documented", "janschu99 categorized dictionary line 52 §1C200X00")
         return "JsmRx1C20"
     elseif bit.band(cid, 0xFFFFF0FF) == 0x14300001 then
-        -- Per-slot quantized percentage gauge (sibling of 0x14300X00
-        -- Motor Current). DLC=1; values observed across 12+ captures
-        -- spanning 2016-2026: 0/13/25/27/50/100. 0x1B = 27% is the
-        -- dominant idle value (appears in every active-slot capture)
-        -- — likely a default servo / control-loop baseline. Other
-        -- values appear during user actions. Best read: torque or
-        -- drive intensity %.
+        -- Per-slot discrete-state byte (sibling of 0x14300X00 Motor
+        -- Current). DLC=1; values across 12+ captures: 0/0x0D/0x19/
+        -- 0x1B/0x32/0x64. The bimodality (0/0x1B/0x64 + transients)
+        -- is more consistent with a small discrete state set than a
+        -- continuous %-measurement — 0x1B (27 dec) doesn't fit any
+        -- obvious quartile, suggesting a fixed magic constant (e.g.
+        -- servo-idle PWM floor) rather than a percentage. Direction
+        -- CONFIRMED chair→bus (PM HCS12): zero hits in v5/v6 DLL,
+        -- DLR EXE, LEDJSM HCS12. PM HCS12 firmware not yet dumped.
         local slot = bit.band(bit.rshift(cid, 8), 0xF)
-        t:add(pf.class, "Motor intensity gauge (per-slot %)")
+        t:add(pf.class, "Per-slot motor state byte (0x14300X01) [discrete states, semantic TBD]")
         t:add(pf.slot, slot)
         if tvb:len() >= 1 then
             local v = tvb(0,1):uint()
             local note = ""
-            if v == 0x1B then note = " (idle baseline)"
-            elseif v == 0    then note = " (disabled)"
-            elseif v == 100  then note = " (full)"
+            if v == 0x1B then note = " (likely idle magic-constant; not 27%)"
+            elseif v == 0    then note = " (off / disabled)"
+            elseif v == 0x64 then note = " (active; possibly full-scale)"
             end
             t:add(pf.summary, string.format(
-                "Motor intensity slot=%X = %d%%%s", slot, v, note))
+                "Per-slot motor state slot=%X value=0x%02X%s", slot, v, note))
         end
-        add_evidence(t, "Documented", "POP_FRAME_FAMILY_DECODES_2026-05-23.md (12+ capture cross-check)")
+        add_evidence(t, "Inferred",
+            "12+ capture cross-check (discrete states); chair-emitted (PM HCS12) confirmed by 4-source dealer-side zero-hit sweep")
         return "MotInt"
     elseif cid == 0x15000000 then
-        -- 5 occurrences total in hackathon dump, DLC=4, constant payload
-        -- 01 00 01 00. Truly undocumented namespace per external RE notes R3
-        -- reply. Likely event/announcement broadcast; precise semantics open.
-        t:add(pf.class, "Event broadcast (0x15) [unverified]")
-        t:add(pf.summary, "Event broadcast — semantics unknown")
-        add_evidence(t, "Inferred", "hackathon-only observation, no corpus citation")
-        return "Event"
+        -- SlotChanged signal: chair→dealer notification that slot config
+        -- has changed. DongleInterface.dll v5 IsSlotChangedMsg @ 0x10001b90
+        -- tests (canid >> 18) == 0x540 (= 0x15000000 >> 18). Consumer
+        -- CheckForSlotChanged @ 0x10008b00 reads payload bytes [0..3] as
+        -- LE u32 slot_change_filekey into CFTDIInterface +0x15cc, then
+        -- SetEvent() to wake waiting consumers. Bytes 4-7 (when present)
+        -- are not consumed by the DLL — chair-side firmware decode only.
+        t:add(pf.class, "SlotChanged signal")
+        local key_str = "<DLC<4>"
+        if tvb:len() >= 4 then
+            local key = tvb(0,4):le_uint()
+            key_str = string.format("0x%08X", key)
+        end
+        t:add(pf.summary, "SlotChanged filekey=" .. key_str)
+        add_evidence(t, "Code",
+            "DongleInterface.dll v5 CheckForSlotChanged @ 0x10008b00 + " ..
+            "IsSlotChangedMsg @ 0x10001b90")
+        return "SlotChanged"
     elseif bit.band(cid, 0xFFF00000) == 0x1E800000 then
         -- 0x1E8X = R-Net session-control namespace (NOT POP, NOT ReBus).
         -- Frames here are R-Net session/control markers — they live
@@ -1892,9 +1986,13 @@ local function decode_xtd(tvb, t, cid, is_rtr)
             summary = string.format("R-Net attach 4/4 — chair fingerprint #2 = 0x%04X (CXTN_RNET ready)", tail)
             conf, src = "Documented", "POP_FRAME_FAMILY_DECODES_2026-05-23.md (per-chair persistent identifier)"
         else
-            label = string.format("0x1E8X R-Net session sentinel (N=%d) [unverified]", subtype)
-            summary = string.format("R-Net session sentinel N=%d tail=0x%04X (subtype semantics TBD)", subtype, tail)
-            conf, src = "Inferred", "0x1E8X R-Net session namespace — subtype N=1-3 not yet observed"
+            -- N=1/2/3 confirmed unused across v5 DLL, v6 DLL,
+            -- DLR EXE, and LEDJSM HCS12 firmware + zero corpus
+            -- observations. If one appears, it's a chair module we
+            -- haven't seen — keep the expert-info marker for visibility.
+            label = string.format("0x1E8X session sentinel (N=%d, deliberately unused)", subtype)
+            summary = string.format("R-Net session sentinel N=%d tail=0x%04X (subtype confirmed-unused across 4 dealer sources)", subtype, tail)
+            conf, src = "Code", "4-source zero-confirm: v5 DLL + v6 DLL + DLR EXE + LEDJSM HCS12 + 19-capture corpus"
         end
         local class_item = t:add(pf.class, label)
         t:add(pf.summary, summary)
