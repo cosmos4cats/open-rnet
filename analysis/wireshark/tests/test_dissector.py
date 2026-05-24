@@ -909,6 +909,67 @@ def test_pointer_data_binding_carries_parameter_name():
     )
 
 
+# ---------------------------------------------------------------------------
+# Negative control — non-R-Net CAN traffic
+# ---------------------------------------------------------------------------
+
+NON_RNET_LOG = DISSECTOR_DIR / "non-rnet-canlog.log"
+
+
+def test_non_rnet_log_produces_no_specific_decodes():
+    """Control file: a candump log from some other (non-R-Net) CAN bus,
+    with CAN IDs 0x720 and 0x728 that don't intersect any R-Net family
+    range. The dissector's heuristic always-claims SocketCAN frames
+    (because there's no bit-level way to tell R-Net from other
+    proprietary CAN at the heuristic stage — see register_heuristic
+    block at end of rnet_can.lua), so it WILL produce per-frame output.
+    But it must NOT produce a confidently-named R-Net class — every
+    frame should fall through to the generic 'Unknown STD 0xXXX' label
+    and no specific rnet.* subfield (pop.odi, joy.x, auth.*, etc.)
+    should populate.
+
+    If this fails after a dissector change, either (a) a new STD-ID
+    handler accidentally widened its range into 0x720/0x728, or
+    (b) a sub-decoder fires on payloads it shouldn't. Both are
+    misclassification bugs worth catching."""
+    if not NON_RNET_LOG.exists():
+        pytest.skip(f"control log not present at {NON_RNET_LOG}")
+    # 1) Every frame must label as Unknown STD
+    proc = subprocess.run(
+        ["tshark", "-r", str(NON_RNET_LOG),
+         "-T", "fields", "-e", "rnet.class"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    classes = [l for l in proc.stdout.splitlines() if l.strip()]
+    assert classes, "no per-frame output — dissector didn't run"
+    not_unknown = [c for c in classes if not c.startswith("Unknown STD")]
+    assert not not_unknown, (
+        f"non-R-Net frames got R-Net-specific labels (sample: "
+        f"{Counter(not_unknown).most_common(5)})"
+    )
+    # 2) No R-Net sub-decoder field should populate
+    suspect_fields = [
+        "rnet.pop.odi", "rnet.pop.register_name", "rnet.joy.x", "rnet.joy.y",
+        "rnet.auth.seq", "rnet.auth.key", "rnet.rtc.year",
+        "rnet.pop.binds_param_name", "rnet.summary",
+    ]
+    proc = subprocess.run(
+        ["tshark", "-r", str(NON_RNET_LOG), "-T", "fields"]
+        + sum([["-e", f] for f in suspect_fields], []),
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    populated_lines = [
+        l for l in proc.stdout.splitlines()
+        if l.strip() and any(c.strip() for c in l.split("\t"))
+    ]
+    assert not populated_lines, (
+        f"R-Net sub-decoder fields populated on non-R-Net frames "
+        f"(first 3): {populated_lines[:3]}"
+    )
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))
