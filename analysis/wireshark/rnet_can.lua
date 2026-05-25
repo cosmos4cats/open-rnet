@@ -1656,10 +1656,8 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
     elseif cid == 0x7A0 then
         -- Normal case: Programmer presence announcement (DLC=0).
         -- Sent by the Programmer when it joins the bus. Per
-        -- rnet-firmware RNET_FRAME_GLOSSARY.md (the older
-        -- UPD_HUNT_AND_POP_FINDING.md doc was retired in
-        -- rnet-firmware's 2026-05-24 cleanup pass; the glossary
-        -- preserves the conclusion).
+        -- rnet-firmware RNET_FRAME_GLOSSARY.md (Programmer-presence
+        -- entry).
         --
         -- Datasheet-verified rare case (per rnet-firmware commit
         -- f4197494): STD 0x07A0 + DLC=8 + all-zero is the actual
@@ -1687,7 +1685,7 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         end
         t:add(pf.class, "Programmer presence")
         t:add(pf.summary, "Programmer presence announcement")
-        add_evidence(t, "Documented", "rnet-firmware RNET_FRAME_GLOSSARY.md (preserves the retired UPD_HUNT_AND_POP_FINDING.md conclusion)")
+        add_evidence(t, "Documented", "rnet-firmware RNET_FRAME_GLOSSARY.md (Programmer-presence entry)")
         return "ProgHere"
     elseif cid == 0x7B0 then
         t:add(pf.class, "Config mode 0")

@@ -970,6 +970,231 @@ def test_non_rnet_log_produces_no_specific_decodes():
     )
 
 
+# ---------------------------------------------------------------------------
+# Structural validation tests (2026-05-24 critique items #1, #3, #4)
+# ---------------------------------------------------------------------------
+#
+# These tests don't exercise wire-decode behavior — they validate the
+# integrity of the project's data + documentation against the dissector
+# itself, catching the kinds of drift that hand-editing two-source-of-truth
+# files inevitably introduces.
+
+
+def test_pwc_params_json_matches_lua_table():
+    """Item #1: the project ships pwc_params.json (canonical, used by
+    reassemble_transfers.py) AND embeds the same 966 entries as a Lua
+    table inside rnet_can.lua (loaded by the dissector). If they drift,
+    parameter names resolve differently between the dissector output
+    and the post-processor. This test asserts they stay in lockstep.
+
+    If this fails after a parameter-name update: regenerate the Lua
+    table from the JSON (or vice-versa) so they match.
+    """
+    import json as _json
+    json_path = DISSECTOR_DIR / "pwc_params.json"
+    if not json_path.exists():
+        pytest.skip(f"pwc_params.json not present at {json_path}")
+
+    canonical = _json.loads(json_path.read_text())
+    # Normalize JSON keys to integers for comparison
+    canonical_int = {int(k): v for k, v in canonical.items()}
+
+    # Extract the Lua table from rnet_can.lua. It looks like:
+    #     pwc_params = {
+    #         [0] = "ALPHA",
+    #         [1] = "Abbreviated",
+    #         ...
+    #     }
+    lua_text = Path(LUA).read_text()
+    m = re.search(r'^pwc_params = \{(.*?)^\}', lua_text,
+                  re.MULTILINE | re.DOTALL)
+    assert m, "pwc_params Lua table not found in dissector"
+    lua_entries = {}
+    for entry in re.finditer(r'\[(\d+)\]\s*=\s*"([^"]*)"', m.group(1)):
+        lua_entries[int(entry.group(1))] = entry.group(2)
+
+    assert canonical_int == lua_entries, (
+        f"pwc_params.json and Lua table out of sync:\n"
+        f"  JSON has {len(canonical_int)} entries, Lua has {len(lua_entries)}\n"
+        f"  Only in JSON: {sorted(set(canonical_int) - set(lua_entries))[:10]}\n"
+        f"  Only in Lua:  {sorted(set(lua_entries) - set(canonical_int))[:10]}\n"
+        f"  Different values for same ID: "
+        f"{[(k, canonical_int[k], lua_entries[k]) for k in set(canonical_int) & set(lua_entries) if canonical_int[k] != lua_entries[k]][:5]}"
+    )
+
+
+def test_corpus_zero_unknown_across_all_captures():
+    """Item #3b: parse claims '0 Unknown across the full corpus' in
+    several places (README headline, commit messages, walkthrough).
+    Without this test, a decoder regression could silently start
+    labeling frames as Unknown and nobody would notice unless someone
+    re-ran the corpus probe by hand.
+
+    Walks every CAN-parsable capture in OPEN_RNET_CAPTURES, asserts
+    zero frames with 'Unknown' in the rnet.class field.
+    """
+    if not OPEN_RNET_CAPTURES.exists():
+        pytest.skip(f"capture corpus not present at {OPEN_RNET_CAPTURES}")
+    found_unknown = []
+    capture_count = 0
+    total_frames = 0
+    for cap in sorted(OPEN_RNET_CAPTURES.rglob("*")):
+        if cap.suffix not in (".pcapng", ".pcap", ".candump", ".log"):
+            continue
+        # tshark fails silently on non-CAN files; skip those
+        check = subprocess.run(
+            ["tshark", "-r", str(cap), "-c", "1"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if check.returncode != 0:
+            continue
+        capture_count += 1
+        # Count total frames
+        total = subprocess.run(
+            ["tshark", "-r", str(cap)],
+            capture_output=True, text=True, timeout=60,
+        )
+        total_frames += sum(1 for l in total.stdout.splitlines() if l.strip())
+        # Count Unknown
+        result = subprocess.run(
+            ["tshark", "-r", str(cap),
+             "-Y", 'rnet.class contains "Unknown"',
+             "-T", "fields", "-e", "frame.number", "-e", "rnet.class"],
+            capture_output=True, text=True, timeout=60,
+        )
+        for line in result.stdout.splitlines():
+            if line.strip():
+                found_unknown.append((cap.name, line))
+    assert capture_count >= 20, (
+        f"only {capture_count} CAN-parseable captures found at "
+        f"{OPEN_RNET_CAPTURES} — corpus seems incomplete"
+    )
+    assert not found_unknown, (
+        f"{len(found_unknown)} frames labeled 'Unknown' across {capture_count} "
+        f"captures ({total_frames} total frames). First 5: {found_unknown[:5]}"
+    )
+
+
+def test_walkthrough_anchors_match_dissector_output():
+    """Item #3a: the README's 'A walked-through session' section
+    hardcodes specific frame numbers + decoded summary text from
+    programmer_write_file_july2017.pcapng. If a future decoder change
+    silently shifts those labels, the walkthrough lies to readers.
+    This test re-runs the dissector against the cited frames and
+    asserts the summaries still contain the phrases the walkthrough
+    promises.
+
+    Anchors checked: phase 1 (Network test), phase 2 (Auth response
+    Table B serial), phase 3 (POINTER→DATA binding for BackUp),
+    phase 4 (R-Net attach handshake 4-step), phase 5 (Transfer
+    Complete sentinel), phase 6 (Sleep cmd at end of capture).
+    """
+    if not have_capture("programmer_write"):
+        pytest.skip("programmer_write capture not present")
+
+    def _frame_summary(n):
+        proc = subprocess.run(
+            ["tshark", "-r", cap_path("programmer_write_file_july2017.pcapng"),
+             "-Y", f"frame.number == {n}",
+             "-T", "fields", "-e", "rnet.summary"],
+            capture_output=True, text=True, timeout=15,
+        )
+        return proc.stdout.strip()
+
+    # Phase 1 — bus enumeration
+    assert "Network test" in _frame_summary(1), \
+        "walkthrough phase 1: frame 1 should mention 'Network test'"
+    assert "50C01C8F" in _frame_summary(2), \
+        "walkthrough phase 1: frame 2 should show JSM serial 50C01C8F"
+
+    # Phase 2 — auth handshake (frame 18 = seq=0 slot=0 serial[0])
+    assert "Auth response seq=0 slot=0" in _frame_summary(18), \
+        "walkthrough phase 2: frame 18 anchors the auth burst"
+
+    # Phase 3 — POINTER→DATA binding (BackUp parameter)
+    assert "BackUp" in _frame_summary(71), \
+        "walkthrough phase 3: frame 71 POINTER setup must name BackUp"
+    assert "BackUp" in _frame_summary(75), \
+        "walkthrough phase 3: frame 75 DATA must inherit BackUp binding"
+
+    # Phase 4 — attach handshake
+    s93 = _frame_summary(93)
+    assert "attach 1/4" in s93 and "Programmer announce" in s93, \
+        f"walkthrough phase 4: frame 93 must label attach step 1; got {s93!r}"
+    s96 = _frame_summary(96)
+    assert "attach 4/4" in s96 and "CXTN_RNET ready" in s96, \
+        f"walkthrough phase 4: frame 96 must label attach step 4 CXTN_RNET ready; got {s96!r}"
+
+    # Phase 5 — Transfer Complete
+    assert "transfer complete" in _frame_summary(372).lower(), \
+        "walkthrough phase 5: frame 372 must label Transfer Complete"
+
+    # Phase 6 — Sleep cmd at end
+    assert "Sleep" in _frame_summary(3223), \
+        "walkthrough phase 6: frame 3223 must label as Sleep"
+
+
+def test_citations_resolve_or_explain():
+    """Item #4: every `add_evidence(t, "...", "<citation>")` in
+    rnet_can.lua should reference docs that exist somewhere we know
+    about — rnet-firmware/docs/, open-rnet/docs/, open-rnet/reference/,
+    or this parse tree itself. This test extracts every .md filename
+    cited and checks each is reachable.
+
+    Best-effort + skip-friendly: if rnet-firmware isn't present
+    (e.g., in CI without the private repo), we only assert against
+    the public locations and skip rnet-firmware-only citations rather
+    than fail. Allowed-private list records the docs we know live in
+    rnet-firmware and accept as 'not findable from this checkout'.
+    """
+    lua_text = Path(LUA).read_text()
+    # Extract .md filenames from add_evidence citations
+    cited_docs = set()
+    for line_no, line in enumerate(lua_text.splitlines(), 1):
+        if 'add_evidence' not in line:
+            continue
+        for m in re.finditer(r'\b([A-Z][A-Z0-9_]{4,}\.md)\b', line):
+            cited_docs.add(m.group(1))
+
+    # Public lookup locations + parse self
+    search_paths = [
+        DISSECTOR_DIR,                                        # parse/
+        DISSECTOR_DIR.parent.parent / "docs",                 # open-rnet/docs
+        DISSECTOR_DIR.parent.parent / "reference",            # open-rnet/reference
+        Path.home() / "src" / "open-rnet" / "docs",
+        Path.home() / "src" / "open-rnet" / "reference",
+        Path.home() / "j" / "open-rnet" / "docs",
+        Path.home() / "j" / "open-rnet" / "reference",
+    ]
+    rnet_firmware_docs = [
+        Path.home() / "j" / "rnet-firmware" / "docs",
+        Path.home() / "src" / "r-net-analysis" / "docs",
+    ]
+
+    def find_doc(name):
+        for base in search_paths:
+            if base.exists() and (base / name).exists():
+                return ("public", base / name)
+        for base in rnet_firmware_docs:
+            if base.exists() and (base / name).exists():
+                return ("private", base / name)
+        return (None, None)
+
+    broken = []
+    for doc in sorted(cited_docs):
+        location, path = find_doc(doc)
+        if location is None:
+            broken.append(doc)
+
+    assert not broken, (
+        f"{len(broken)} cited docs not found in any expected location:\n  "
+        + "\n  ".join(broken)
+        + "\n\nEither (a) the doc was renamed/retired in rnet-firmware and "
+        "the citation needs updating, or (b) a new lookup location should be "
+        "added to this test."
+    )
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))
