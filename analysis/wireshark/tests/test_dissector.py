@@ -1137,15 +1137,18 @@ def test_walkthrough_anchors_match_dissector_output():
 def test_citations_resolve_or_explain():
     """Item #4: every `add_evidence(t, "...", "<citation>")` in
     rnet_can.lua should reference docs that exist somewhere we know
-    about — rnet-firmware/docs/, open-rnet/docs/, open-rnet/reference/,
-    or this parse tree itself. This test extracts every .md filename
-    cited and checks each is reachable.
+    about. This test extracts every .md filename cited and checks
+    each is reachable.
 
-    Best-effort + skip-friendly: if rnet-firmware isn't present
-    (e.g., in CI without the private repo), we only assert against
-    the public locations and skip rnet-firmware-only citations rather
-    than fail. Allowed-private list records the docs we know live in
-    rnet-firmware and accept as 'not findable from this checkout'.
+    Public lookup locations always probed: this parse tree itself,
+    open-rnet/docs/, open-rnet/reference/.
+
+    Private upstream-RE locations are probed only if the
+    RNET_FIRMWARE_DOCS env var is set to their docs/ directory. Set
+    it via Makefile.local for the dev workflow, or in your shell
+    rc. When unset (e.g., on a CI runner without the private repo),
+    private-only citations are skipped rather than failing — the
+    test still validates everything reachable from public sources.
     """
     lua_text = Path(LUA).read_text()
     # Extract .md filenames from add_evidence citations
@@ -1156,7 +1159,7 @@ def test_citations_resolve_or_explain():
         for m in re.finditer(r'\b([A-Z][A-Z0-9_]{4,}\.md)\b', line):
             cited_docs.add(m.group(1))
 
-    # Public lookup locations + parse self
+    # Public lookup locations
     search_paths = [
         DISSECTOR_DIR,                                        # parse/
         DISSECTOR_DIR.parent.parent / "docs",                 # open-rnet/docs
@@ -1166,32 +1169,54 @@ def test_citations_resolve_or_explain():
         Path.home() / "j" / "open-rnet" / "docs",
         Path.home() / "j" / "open-rnet" / "reference",
     ]
-    rnet_firmware_docs = [
-        Path.home() / "j" / "rnet-firmware" / "docs",
-        Path.home() / "src" / "r-net-analysis" / "docs",
-    ]
+    # Private upstream-RE location via env var (optional)
+    private_docs = []
+    fw_env = os.environ.get('RNET_FIRMWARE_DOCS')
+    if fw_env:
+        private_docs.append(Path(fw_env))
 
     def find_doc(name):
         for base in search_paths:
             if base.exists() and (base / name).exists():
                 return ("public", base / name)
-        for base in rnet_firmware_docs:
+        for base in private_docs:
             if base.exists() and (base / name).exists():
                 return ("private", base / name)
         return (None, None)
 
     broken = []
+    unverifiable = []  # cited but only knowable from private docs we can't reach
     for doc in sorted(cited_docs):
         location, path = find_doc(doc)
         if location is None:
-            broken.append(doc)
+            if private_docs:
+                # We had access to private docs and still couldn't find it
+                broken.append(doc)
+            else:
+                # No private docs available — could be either a private-only
+                # citation (acceptable) or a genuinely broken ref. We can't
+                # tell which without the env var, so report up via skip
+                # rather than silently pass.
+                unverifiable.append(doc)
+
+    # Skip with an informative message when private-only citations exist
+    # and RNET_FIRMWARE_DOCS isn't set — analyst sees what didn't get
+    # verified and what to set to fix it, rather than a silent pass.
+    if unverifiable:
+        pytest.skip(
+            f"{len(unverifiable)} cited doc(s) couldn't be located in "
+            f"public lookup paths: {unverifiable}.\n"
+            f"They may exist in private upstream-RE docs. To verify, set "
+            f"RNET_FIRMWARE_DOCS in your shell or Makefile.local to point "
+            f"at that tree's docs/ directory and re-run."
+        )
 
     assert not broken, (
-        f"{len(broken)} cited docs not found in any expected location:\n  "
+        f"{len(broken)} cited docs not found in any known location:\n  "
         + "\n  ".join(broken)
-        + "\n\nEither (a) the doc was renamed/retired in rnet-firmware and "
-        "the citation needs updating, or (b) a new lookup location should be "
-        "added to this test."
+        + "\n\nLikely (a) the doc was renamed/retired upstream and the "
+        "citation needs updating, or (b) a new public lookup location "
+        "should be added to this test."
     )
 
 

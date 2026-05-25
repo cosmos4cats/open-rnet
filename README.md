@@ -173,9 +173,20 @@ with the values you want to pin:
 
 ```make
 # Makefile.local — pins for this checkout, never committed
-OPEN_RNET   := $(HOME)/code/open-rnet
-INSTALL_DIR := /opt/wireshark/plugins
+OPEN_RNET          := $(HOME)/code/open-rnet
+INSTALL_DIR        := /opt/wireshark/plugins
+RNET_FIRMWARE_DOCS := $(HOME)/code/upstream-re/docs   # optional; see below
 ```
+
+`RNET_FIRMWARE_DOCS` is optional. The citation-validator test
+(`test_citations_resolve_or_explain`) probes a set of public locations
+for every `.md` doc cited in `add_evidence()` calls. Some citations
+reference upstream-RE docs that aren't always available locally; if
+you have that tree checked out, point `RNET_FIRMWARE_DOCS` at its
+`docs/` directory and the validator will probe it too. When unset
+(e.g., on a CI runner without the private tree), private-only
+citations are reported as "can't verify from this checkout" rather
+than failing the test.
 
 The Makefile does `-include Makefile.local` after its defaults, so
 your local config wins. The file is in `.gitignore` so it never lands
