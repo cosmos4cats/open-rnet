@@ -932,8 +932,13 @@ def test_non_rnet_log_produces_no_specific_decodes():
     handler accidentally widened its range into 0x720/0x728, or
     (b) a sub-decoder fires on payloads it shouldn't. Both are
     misclassification bugs worth catching."""
-    if not NON_RNET_LOG.exists():
-        pytest.skip(f"control log not present at {NON_RNET_LOG}")
+    # non-rnet-canlog.log is committed to the repo. Missing-file means
+    # someone deleted a tracked file; that's a bug, not a skip condition.
+    assert NON_RNET_LOG.exists(), (
+        f"non-rnet-canlog.log missing from {NON_RNET_LOG}. This file is "
+        f"committed to the repo as a negative-control fixture. Restore "
+        f"with `git checkout HEAD -- {NON_RNET_LOG.name}`."
+    )
     # 1) Every frame must label as Unknown STD
     proc = subprocess.run(
         ["tshark", "-r", str(NON_RNET_LOG),
@@ -992,8 +997,15 @@ def test_pwc_params_json_matches_lua_table():
     """
     import json as _json
     json_path = DISSECTOR_DIR / "pwc_params.json"
-    if not json_path.exists():
-        pytest.skip(f"pwc_params.json not present at {json_path}")
+    # pwc_params.json is a tracked file in the parse repo and MUST be
+    # present. If it isn't, that's a "someone deleted a committed file"
+    # bug — fail hard so it's noticed, not silently skipped.
+    assert json_path.exists(), (
+        f"pwc_params.json missing from {json_path}. This file is "
+        f"committed to the repo and is required for the dissector to "
+        f"resolve PWC parameter names. If you deleted it, restore from "
+        f"`git checkout HEAD -- {json_path.name}`."
+    )
 
     canonical = _json.loads(json_path.read_text())
     # Normalize JSON keys to integers for comparison
