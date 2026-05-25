@@ -120,6 +120,68 @@ def fields(cap_name: str, filter: str, field_names: list) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Session-scoped capture cache (for bulk-corpus tests)
+# ---------------------------------------------------------------------------
+#
+# Tests that count or filter many things across many captures used to
+# spawn tshark once per (capture, filter) combination — 90+ tshark
+# processes for a single test, ~17s wall-clock. This cache walks each
+# CAN-parseable capture in OPEN_RNET_CAPTURES ONCE, extracts the
+# union of fields any bulk-corpus test needs, and gives tests an
+# in-memory iterable they can filter via Python predicates.
+#
+# Filtering 30k rows in Python is microseconds; the cost was the
+# tshark process spawn (cold-start + Lua plugin reload + capture
+# parse, ~150-300ms each). Net effect: ~30 invocations instead of
+# 150+, and individual bulk tests drop from 8-17s to <0.5s.
+
+CACHED_FIELDS = [
+    "frame.number", "rnet.class", "rnet.summary",
+    "rnet.err.code", "rnet.err.name", "rnet.auth.network",
+]
+
+
+@pytest.fixture(scope="session")
+def capture_cache():
+    """One-tshark-per-capture cache. Returns:
+        { Path(capture): [ {field_name: value, ...}, ... ] }
+    Captures that tshark can't parse (non-CAN files, malformed) are
+    silently skipped — the cache only contains entries for files
+    that produced output. If OPEN_RNET_CAPTURES doesn't exist,
+    returns an empty dict (tests that depend on the cache should
+    skip via `if not capture_cache: pytest.skip(...)`).
+    """
+    cache = {}
+    if not OPEN_RNET_CAPTURES.exists():
+        return cache
+    field_args = sum([["-e", f] for f in CACHED_FIELDS], [])
+    for cap in sorted(OPEN_RNET_CAPTURES.rglob("*")):
+        if cap.suffix not in (".pcapng", ".pcap", ".candump", ".log"):
+            continue
+        try:
+            proc = subprocess.run(
+                ["tshark", "-r", str(cap), "-T", "fields"] + field_args,
+                capture_output=True, text=True, timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            continue
+        if proc.returncode != 0:
+            continue
+        rows = []
+        for line in proc.stdout.splitlines():
+            if not line.strip():
+                continue
+            parts = line.split("\t")
+            # Pad in case tshark dropped trailing empties
+            while len(parts) < len(CACHED_FIELDS):
+                parts.append("")
+            rows.append(dict(zip(CACHED_FIELDS, parts)))
+        if rows:
+            cache[cap] = rows
+    return cache
+
+
+# ---------------------------------------------------------------------------
 # Category 1: Coverage regression
 # ---------------------------------------------------------------------------
 
@@ -142,20 +204,22 @@ def test_coverage_no_unknown_classes(cap):
     )
 
 
-def test_coverage_total_evidenced_threshold():
+def test_coverage_total_evidenced_threshold(capture_cache):
     """Across the full corpus, ≥99% of frames decode under an evidenced rule
-    (not [unverified], not unknown).
+    (not [unverified], not unknown). Uses the session capture_cache so the
+    whole sweep happens via cached rows rather than re-running tshark
+    per filter.
     """
+    if not capture_cache:
+        pytest.skip("capture corpus not present")
     total = 0
     evidenced = 0
-    for cap in CAPTURES:
-        if not have_capture(cap):
-            continue
-        t = count(cap, "")
-        u = count(cap, 'rnet.class contains "Unknown"')
-        v = count(cap, 'rnet.class contains "unverified"')
-        total += t
-        evidenced += t - u - v
+    for cap, rows in capture_cache.items():
+        for row in rows:
+            cls = row.get("rnet.class", "")
+            total += 1
+            if "Unknown" not in cls and "unverified" not in cls:
+                evidenced += 1
     assert total > 100_000, f"corpus too small: {total}"
     pct = evidenced / total
     assert pct >= 0.99, (
@@ -255,7 +319,7 @@ def test_decode_poweronJSMsh_recovers_serial_via_auth():
     )
 
 
-def test_decode_error_catalog_resolves_newly_added_codes():
+def test_decode_error_catalog_resolves_newly_added_codes(capture_cache):
     """The rnet-firmware regenerated JSONL (v2, 2026-05-22) with confidence
     levels + code_swapped_hex lookup should resolve codes that were
     previously "undocumented" in parse's earlier integration.
@@ -275,18 +339,28 @@ def test_decode_error_catalog_resolves_newly_added_codes():
         0x2100: "Progress Count Error",
         0x2200: "Joystick Toggle Error",
     }
-    # Sample from the captures that have these errors
-    for cap in ["full_action", "aug19th", "0x1f201e0e"]:
-        if not have_capture(cap):
+    # Walk via the capture cache so this drops from ~9s of tshark
+    # spawns to filtering rows in Python.
+    cap_hints = ("full_action", "aug19th", "0x1f201e0e")
+    matched_some_code = False
+    for cap, rows in capture_cache.items():
+        if not any(hint in cap.name for hint in cap_hints):
             continue
         for code, expected_substring in new_codes.items():
-            rows = fields(cap, f"rnet.err.code == {code}",
-                          ["rnet.err.name"])
-            if rows and rows[0][0]:
-                assert expected_substring.lower() in rows[0][0].lower(), (
-                    f"{cap} code 0x{code:04X}: got {rows[0][0]!r}, "
+            code_hex = f"0x{code:04x}"
+            matching = [r for r in rows if r.get("rnet.err.code", "").lower() == code_hex
+                        and r.get("rnet.err.name", "")]
+            if matching:
+                matched_some_code = True
+                got = matching[0]["rnet.err.name"]
+                assert expected_substring.lower() in got.lower(), (
+                    f"{cap.name} code {code_hex}: got {got!r}, "
                     f"expected substring {expected_substring!r}"
                 )
+    assert matched_some_code, (
+        "no captures with the expected fault codes were found — corpus "
+        "may have changed"
+    )
 
 
 def test_decode_lighting_lamp_test_d5d5():
@@ -1035,55 +1109,34 @@ def test_pwc_params_json_matches_lua_table():
     )
 
 
-def test_corpus_zero_unknown_across_all_captures():
+def test_corpus_zero_unknown_across_all_captures(capture_cache):
     """Item #3b: parse claims '0 Unknown across the full corpus' in
     several places (README headline, commit messages, walkthrough).
     Without this test, a decoder regression could silently start
     labeling frames as Unknown and nobody would notice unless someone
     re-ran the corpus probe by hand.
 
-    Walks every CAN-parsable capture in OPEN_RNET_CAPTURES, asserts
-    zero frames with 'Unknown' in the rnet.class field.
+    Walks every CAN-parsable capture in OPEN_RNET_CAPTURES (via the
+    session-scoped capture_cache fixture), asserts zero frames with
+    'Unknown' in the rnet.class field.
     """
-    if not OPEN_RNET_CAPTURES.exists():
+    if not capture_cache:
         pytest.skip(f"capture corpus not present at {OPEN_RNET_CAPTURES}")
     found_unknown = []
-    capture_count = 0
-    total_frames = 0
-    for cap in sorted(OPEN_RNET_CAPTURES.rglob("*")):
-        if cap.suffix not in (".pcapng", ".pcap", ".candump", ".log"):
-            continue
-        # tshark fails silently on non-CAN files; skip those
-        check = subprocess.run(
-            ["tshark", "-r", str(cap), "-c", "1"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if check.returncode != 0:
-            continue
-        capture_count += 1
-        # Count total frames
-        total = subprocess.run(
-            ["tshark", "-r", str(cap)],
-            capture_output=True, text=True, timeout=60,
-        )
-        total_frames += sum(1 for l in total.stdout.splitlines() if l.strip())
-        # Count Unknown
-        result = subprocess.run(
-            ["tshark", "-r", str(cap),
-             "-Y", 'rnet.class contains "Unknown"',
-             "-T", "fields", "-e", "frame.number", "-e", "rnet.class"],
-            capture_output=True, text=True, timeout=60,
-        )
-        for line in result.stdout.splitlines():
-            if line.strip():
-                found_unknown.append((cap.name, line))
-    assert capture_count >= 20, (
-        f"only {capture_count} CAN-parseable captures found at "
+    total_frames = sum(len(rows) for rows in capture_cache.values())
+    for cap, rows in capture_cache.items():
+        for row in rows:
+            if "Unknown" in row.get("rnet.class", ""):
+                found_unknown.append((cap.name, row.get("frame.number", "?"),
+                                      row.get("rnet.class", "")))
+    assert len(capture_cache) >= 20, (
+        f"only {len(capture_cache)} CAN-parseable captures found at "
         f"{OPEN_RNET_CAPTURES} — corpus seems incomplete"
     )
     assert not found_unknown, (
-        f"{len(found_unknown)} frames labeled 'Unknown' across {capture_count} "
-        f"captures ({total_frames} total frames). First 5: {found_unknown[:5]}"
+        f"{len(found_unknown)} frames labeled 'Unknown' across "
+        f"{len(capture_cache)} captures ({total_frames} total frames). "
+        f"First 5: {found_unknown[:5]}"
     )
 
 
