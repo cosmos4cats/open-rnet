@@ -113,6 +113,94 @@ Restart Wireshark (or run `tshark` afresh) and the dissector loads
 automatically. Verify in Wireshark: **Help → About → Plugins** should
 list `rnet_can.lua`.
 
+### For development — the Makefile
+
+If you're working from the `parse/` development tree, a Makefile
+wraps the common workflows so you can stop reaching for the same
+three commands every commit:
+
+```sh
+make help      # list targets
+make install   # copy rnet_can.lua into the Wireshark plugin dir
+make test      # run the 82-test pytest suite
+make verify    # tests + full-corpus 0-Unknown regression check
+make sync      # install + mirror parse-tree files to open-rnet
+```
+
+#### How `make install` finds the plugin dir
+
+Wireshark's per-user Lua plugin path varies by OS, Wireshark version,
+and install method. There's no single hardcodable answer. The Makefile
+asks `tshark` itself:
+
+```sh
+tshark -G folders | awk -F'\t' '/^Personal Lua Plugins:/ {print $2}'
+```
+
+That returns the path Wireshark expects user-installed Lua dissectors
+to live in (e.g. `/Users/you/.local/lib/wireshark/plugins` on macOS
+with Homebrew, `~/snap/wireshark/.../...` on Snap-installed Linux,
+etc.). The Makefile uses that value; if `tshark` isn't on PATH, it
+falls back to the historical Linux/macOS default. You can also force
+a specific path:
+
+```sh
+INSTALL_DIR=~/some/other/path make install
+```
+
+#### How `make sync` mirrors to open-rnet
+
+The convention is **parse-first**: edit `parse/`, never edit the
+mirror directly. `make sync` then copies the parse-tree files
+(`rnet_can.lua`, `pwc_params.json`, `reassemble_transfers.py`,
+`rnet-dump`, the negative-control log, all tests, and the README)
+into `$(OPEN_RNET)/analysis/wireshark/` so the public-facing copy
+stays in lockstep. Default `OPEN_RNET` is `~/src/open-rnet`; override
+the same way as `INSTALL_DIR`:
+
+```sh
+OPEN_RNET=~/code/open-rnet make sync
+```
+
+If the open-rnet tree isn't present at `OPEN_RNET`, `make sync`
+gracefully skips the mirror step but still does the local Wireshark
+install.
+
+#### Per-user paths via `Makefile.local`
+
+Rather than retyping env vars, create `Makefile.local` (gitignored)
+with the values you want to pin:
+
+```make
+# Makefile.local — pins for this checkout, never committed
+OPEN_RNET   := $(HOME)/code/open-rnet
+INSTALL_DIR := /opt/wireshark/plugins
+```
+
+The Makefile does `-include Makefile.local` after its defaults, so
+your local config wins. The file is in `.gitignore` so it never lands
+in version control.
+
+#### What `make verify` actually checks
+
+Beyond `make test` (the pytest suite), `make verify` walks every
+CAN-parseable capture in `$(OPEN_RNET)/captures/` and asserts **zero
+frames are labeled "Unknown"** by the dissector. This is the
+load-bearing coverage claim that lives in the README headline; the
+verify target ensures a code change can't silently regress it. If
+the open-rnet capture corpus isn't present, the corpus check is
+skipped (the pytest suite is the floor).
+
+#### No GitHub Actions for parse itself
+
+`parse/` lives on a private git server (`igit`), so GitHub Actions
+doesn't run for the canonical dev tree. The `make verify` workflow
+gives equivalent regression coverage as a pre-push discipline. The
+open-rnet mirror (the public fork at `github.com/cosmos4cats/open-rnet`)
+**does** have a GitHub Actions workflow at
+`.github/workflows/wireshark-dissector-tests.yml` that runs the same
+pytest suite on every push affecting `analysis/wireshark/`.
+
 You can confirm from the command line by running `tshark` against a
 capture without any `-X` flag and looking for `R-Net` in the output:
 
