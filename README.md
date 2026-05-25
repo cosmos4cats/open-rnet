@@ -60,6 +60,7 @@ anyone can send us.
 - [Independent corroboration during development](#independent-corroboration-during-development)
 - [Authentication and access control — the whole story](#authentication-and-access-control--the-whole-story)
 - [Reading the output — things that look weird but aren't bugs](#reading-the-output--things-that-look-weird-but-arent-bugs) — quirky labels explained
+- [A walked-through session](#a-walked-through-session--programmer_write_file_july2017pcapng) — one real capture, frame by frame, showing how labels and cross-frame state tell a story
 - [Filters, recipes, and field reference](#filters-recipes-and-field-reference) — filter examples, **common investigations**, recommended Wireshark columns, complete `rnet.*` field catalog
 - [Known gaps](#known-gaps)
 - [Interesting frames worth sharing](#interesting-frames-worth-sharing) — "if you see this, please share" expert-info markers
@@ -477,13 +478,13 @@ alongside the source citation when you want to verify a claim.
 
 #### Current distribution (as of 2026-05-24, post-audit)
 
-Across 59 evidence-tagged decode rules in the dissector:
+Across 60 evidence-tagged decode rules in the dissector:
 
 | Kind        | Count | %    |
 |-------------|------:|-----:|
-| Code        |    15 | 25%  |
-| Documented  |    36 | 61%  |
-| Inferred    |     8 | 14%  |
+| Code        |    16 | 27%  |
+| Documented  |    36 | 60%  |
+| Inferred    |     8 | 13%  |
 
 (Distribution shifted significantly on 2026-05-24 after a primary-source
 audit reclassified open-rnet-citing rules from `Code` to `Documented`.
@@ -959,6 +960,219 @@ others cover a handful (rare faults). The README's separate
 most of its rules are Documented or Inferred, because the few Code-
 tier rules cover the bulk of the wire traffic.
 
+## A walked-through session — `programmer_write_file_july2017.pcapng`
+
+Reference material tells you what each frame means in isolation. This
+section shows the frames *working together* across one real capture
+— a Programmer dongle attaching to a chair, authenticating, writing
+parameter values, and shutting down. Frame numbers below are real
+positions in the 3,227-frame `programmer_write_file_july2017.pcapng`
+shipped with `open-rnet`. To follow along live:
+
+```sh
+wireshark -X lua_script:rnet_can.lua \
+  open-rnet/captures/programmer_write_file_july2017.pcapng
+```
+
+### Phase 1 — Bus enumeration (frames 1-17)
+
+Before any session-level activity, the chair side of the bus is
+already doing two periodic things:
+
+```
+1   Network test (STD 0x00C, periodic bus-presence probe)
+2   JSM serial=50C01C8F
+3   Serial exchange (STD 0x7B3, chair-side enum response)
+```
+
+`Network test` on STD `0x00C` is the chair's "is anyone alive" ping
+— it goes out on a timer regardless of session state. `JSM serial`
+on STD `0x00E` is the periodic 8-byte state-vector broadcast (per
+the BTMouse change-detect handler at FW `0x854C`) — the first 4
+bytes are the joystick module's serial number, the rest zero in
+practice. From this one frame parse already knows the chair-side
+identity: **JSM serial `50C01C8F`** matches the M300 network entry
+in parse's XOR-table (Table B), which means subsequent auth-response
+frames will get a `✓ Table B` annotation automatically.
+
+`Serial exchange` (STD `0x7B3`) traffic with RTR challenges (frames
+9, 12, 14) is the chair-side module-enumeration protocol —
+modules announce themselves on demand. This is normal pre-session
+chatter; the dissector labels it cleanly so you can tell at a glance
+that the Programmer hasn't actually started doing anything yet.
+
+### Phase 2 — Auth handshake (frames 18-40)
+
+This is where things get interesting. The chair runs an 8-step
+XOR-table challenge-response across multiple slots:
+
+```
+18  Auth response seq=0 slot=0 serial[0]=0x0C
+19  Auth response seq=1 slot=0 serial[1]=0x01
+20  Auth response seq=2 slot=0 serial[2]=0x14
+21  Auth response seq=3 slot=0 serial[3]=0x8B
+...
+26  Auth challenge seq=0 slot=1 key=0x95 (RTR — chair, please respond)
+...
+34  Auth response seq=0 slot=2 serial[0]=0x50
+35  Auth response seq=1 slot=2 serial[1]=0xC0
+36  Auth response seq=2 slot=2 serial[2]=0x1C
+37  Auth response seq=3 slot=2 serial[3]=0x8F
+```
+
+Two device serials surface here: `0C01148B` (slot 0) and `50C01C8F`
+(slot 2 — matches the JSM serial from Phase 1). The seq 4-7 frames
+are "extended round" responses — same protocol, just past the
+4-byte serial boundary. Auth-response frames 34-37 cross-check
+against parse's known XOR networks and ID this bus as **Table B
+(M300 network)**. See [`Authentication and access control`](#authentication-and-access-control--the-whole-story)
+for the full structural model — but in the wire, this whole phase
+is a ~25-frame burst that happens once at the start of every
+Programmer session.
+
+### Phase 3 — POP parameter exchange (frames 71-92)
+
+This is the heart of "the Programmer is doing something to the
+chair." POP uses a two-frame pattern: one frame **names a parameter
+via the POINTER register**, the next **reads or writes the value
+via the DATA register**. Frame 71 sets up:
+
+```
+71  POP PM→JSM  DATA reg=POINTER  ptr=6.1 (param 262: BackUp)
+```
+
+The dissector resolves `ptr=6.1` to `BackUp` (a seat-back actuator
+parameter) using parse's `pwc_params.json` registry. Then:
+
+```
+74  POP JSM→PM  REQUEST reg=POINTER          ← "tell me about ptr"
+75  POP PM→JSM  ACK reg=DATA  value=0x0000 (0) → param 262: BackUp
+76  POP JSM→PM  OPEN reg=DATA  value=0x9288 (37512) → param 262: BackUp
+```
+
+Notice how the DATA-register frames at 75 and 76 don't carry the
+parameter name on the wire — but the dissector's per-frame summary
+includes `→ param 262: BackUp` because of the POINTER binding from
+frame 71. This is parse's cross-frame state at work; the `rnet.pop.
+binds_param_name` field is filterable on its own:
+
+```
+tshark -Y 'rnet.pop.binds_param_name == "BackUp"' ...
+```
+
+Frames 84-92 repeat the pattern for `BackToggle` and `BackUpLatch`
+— the chair gets reconfigured for these three actuator parameters
+in rapid succession.
+
+### Phase 4 — R-Net session promotion (frames 93-96)
+
+Right after the Programmer is satisfied that the chair is in a
+state it can talk to, it sends the **4-step attach handshake** that
+promotes the connection from `CXTN_CAN` (raw CAN) to `CXTN_RNET`
+(full R-Net session state machine):
+
+```
+93  R-Net attach 1/4 — Programmer announce (CXTN_CAN→CXTN_RNET begin)
+94  R-Net attach 2/4 — chair ack
+95  R-Net attach 3/4 — chair fingerprint #1 = 0x8314
+96  R-Net attach 4/4 — chair fingerprint #2 = 0x0166 (CXTN_RNET ready)
+```
+
+After frame 96, every subsequent frame in the dissector's output
+carries an `R-Net session state: CXTN_RNET` annotation in the
+detail tree (or `CXTN_UPLOAD` / `CXTN_DOWNLOAD` during transfer
+episodes). The fingerprints `0x8314` and `0x0166` are
+chair-specific — they repeat across captures of the same physical
+chair, making them useful as an identity tag.
+
+### Phase 5 — Sustained parameter operations (frames 100-3000+)
+
+The bulk of the capture is variations on Phase 3 — POINTER→DATA
+binding for parameters like `BackDownLatch`, `BackToggleLatch`,
+`LegRestRDown`, `TiltUp`, `TiltDown`, `LegRestDown`, `TiltToggle`,
+`LegRestToggle`. Each cluster ends with a **Transfer Complete
+sentinel** marking the return from `CXTN_UPLOAD/DOWNLOAD` to
+`CXTN_RNET`:
+
+```
+372  ReBus transfer complete — R-Net returns to CXTN_RNET
+618  ReBus transfer complete — R-Net returns to CXTN_RNET
+897  ReBus transfer complete — R-Net returns to CXTN_RNET
+1145 ReBus transfer complete — R-Net returns to CXTN_RNET
+... (10 transfer episodes total)
+```
+
+If you wanted to count "how many parameter-write operations happened
+in this capture" the answer is simply: **filter on the Transfer
+Complete sentinel.**
+
+```
+tshark -r programmer_write_file_july2017.pcapng \
+  -Y 'rnet.class contains "Transfer Complete"' \
+  | wc -l
+```
+
+Each episode contains a mix of POP traffic (parameter writes),
+joystick-position broadcasts (`X=+0 Y=+0 (idle)` — the user
+isn't moving), motor-enable telemetry, and occasional `POP
+PM→Programmer Abort` frames where the chair-side declines a
+request (parameter probably read-only in the chair's current state).
+
+### Phase 6 — Shutdown (frames 3218-3227)
+
+The session ends cleanly:
+
+```
+3218  Seen during JSM init (STD 0x002, chair→bus payload-less signal)
+3219  JSM sleep commencing (STD 0x004, chair→bus payload-less signal)
+3220  Seen during JSM init (STD 0x002, chair→bus payload-less signal)
+3221  JSM sleep commencing (STD 0x004, chair→bus payload-less signal)
+3222  Seen during JSM init (STD 0x002, chair→bus payload-less signal)
+3223  Sleep cmd
+3224  Sleep all (RTR)
+3225  Sleep cmd
+3226  Sleep cmd
+3227  ReBus transfer complete — R-Net returns to CXTN_RNET
+```
+
+The chair's JSM module oscillates between "init" and "sleep
+commencing" states briefly, then `STD 0x000` Sleep commands take
+the whole bus down. Frame 3227's Transfer Complete is the residual
+end-of-last-transfer sentinel — the bus is functionally idle.
+
+### What this session tells you about R-Net
+
+This is a 3,227-frame Programmer-attached configuration session.
+End-to-end:
+
+1. **The chair is always pinging** — Phase 1's STD `0x00C` Network
+   test, STD `0x00E` JSM serial heartbeat, and STD `0x7B3` Serial
+   exchange traffic happen whether or not anything's connected.
+2. **Auth is structurally distinct from access control** — Phase 2's
+   8-step XOR challenge-response is a node-identity validation, NOT
+   a security check (the chair's actual access gate is the separate
+   `0x08280F02` R-Net Unlock frame; this capture happens to not
+   send one because it's only writing actuator parameters, not
+   destructive operations). See [`Authentication and access control`](#authentication-and-access-control--the-whole-story).
+3. **Session promotion is explicit** — Phase 4's 4-step handshake
+   is the dividing line between "we share a bus" and "we share a
+   protocol session." Before frame 96, the dissector emits
+   `CXTN_CAN`; after, `CXTN_RNET`.
+4. **Parameter access is two-frame** — Phase 3/5's POINTER→DATA
+   pattern is the spine of POP-level parameter R/W. parse's
+   cross-frame binding makes the parameter name visible on the
+   DATA frame too.
+5. **Transfer Complete is the punctuation** — every meaningful
+   chunk of work ends with `0x1E80000F`. Counting them gives you
+   "how many distinct things did the Programmer do."
+
+Try this approach on any other capture in the corpus: identify the
+Phase-1 chatter (always there), find the Phase-2 auth burst (start
+of session), look for Phase-4 attach if a session was actually
+established, then read the Phase-5 episodes by Transfer-Complete
+boundaries. The labels and cross-frame fields parse adds carry the
+story.
+
 ## Filters, recipes, and field reference
 
 What the dissector lets you ask of a capture: quick-reference filter
@@ -1400,6 +1614,7 @@ panel (severity: Warning) so you can't miss them. The current
 | **BT-pairing-unlock full sequence (Pattern A → Pattern B)** | Pattern B arrives within ~1s of a Pattern A on the same bus | The actually-interesting case. WARN-severity marker fires on the Pattern B frame. The handler then calls a banked function whose effect we can't statically see — likely BT pairing enable, factory test mode, or service-only parameter writes. |
 | **Dormant chair-listened STD CAN IDs** | STD `0x001`, `0x00A`, `0x0F0`, `0x7C0`, `0x7E0`, `0x7E4`, `0x7E8`, `0x7EC` | All appear in BTMouse's literal CAN-ID table at flash `0x56E0-0x571B` (cross-validated against LEDJSM HCS12 at flash `0x57C8+`) — the chair has acceptance-filter and/or dispatch entries ready to react. But none of these IDs has ever appeared in any of the 30 captures in parse's corpus. Likely candidates: factory/diagnostic frames, service-tool triggers, or planned-but-not-shipped variants. |
 | **0x1E8X session sentinel with subtype 1, 2, or 3** | XTD `0x1E810000`-`0x1E830000` (the rare subtypes) | Multi-source negative confirmation across 4 dealer-side binaries and the 30-capture corpus says these subtypes are deliberately unused (parse handles N=0 Transfer Complete and N=4-7 attach handshake — the rest were never seen). If a wire frame uses one, that means a chair module we don't have a primary source for. |
+| **Fault code with no catalog entry** | Status/error frame (XTD `0x140C0X0Y`) carrying a code parse doesn't recognize | Parse has ~830 known fault codes from `open-rnet/docs/RNET_ERROR_CODES.md` + Generic V33_1_1375 .rnd extraction. A code outside both catalogs likely means an OEM-specific .rnd (Amylior / Permobil / Pride / SwitchIt) or a chair firmware generation we don't have. NOTE-severity marker. When a paramtree-coincidence hint is available, the summary includes it with explicit "almost certainly NOT the fault name" framing — a hint for analysts, not a claim. |
 
 If you capture any of these:
 1. Save the pcap/pcapng (or `candump -L` text log) — even a few minutes around the event is useful

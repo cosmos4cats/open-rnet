@@ -326,6 +326,35 @@ local pe = {
         "rnet.expert.dormant_chair_listened",
         "RARE: STD ID is in BTMouse's chair-side listen table but has ZERO prior corpus observations — likely factory/diagnostic frame, please share this capture",
         expert.group.PROTOCOL, expert.severity.WARN),
+
+    -- Status-frame fault code with no entry in any catalog we have.
+    -- Parse currently tracks ~830 known codes (open-rnet RNET_ERROR_
+    -- CODES.md + Generic V33_1_1375 .rnd extraction). A wire frame
+    -- carrying a code outside both catalogs probably means either
+    -- (a) an OEM-specific .rnd we haven't decrypted (Amylior /
+    -- Permobil / Pride / SwitchIt / etc.), or (b) a chair firmware
+    -- generation we haven't catalogued. Either way the code is
+    -- worth sharing — fault codes are stable across OEMs in their
+    -- low byte but the high byte often encodes the OEM-specific
+    -- module, so a new code in a capture is an evidence opportunity.
+    unresolved_fault_code = ProtoExpert.new(
+        "rnet.expert.unresolved_fault_code",
+        "NOTABLE: Status/error frame carries a fault code not in parse's catalog — likely OEM-specific or new firmware generation; please share this capture (see README 'Interesting frames worth sharing')",
+        expert.group.UNDECODED, expert.severity.NOTE),
+
+    -- Unresolved fault code WHERE a coincidental byte-pattern match
+    -- exists in the Generic V33 .rnd parameter-tree (not the fault
+    -- table). We surface the coincidence in the marker text as a hint
+    -- for the analyst (the byte pattern matched X in the .rnd's
+    -- parameter-path table) but explicitly do NOT use the name as
+    -- the fault label — it's almost certainly a coincidence, not the
+    -- fault's actual meaning. This lets the analyst search for the
+    -- hint string in their own materials without misleading the
+    -- primary decode output.
+    fault_code_paramtree_hint = ProtoExpert.new(
+        "rnet.expert.fault_code_paramtree_hint",
+        "HINT (low confidence): fault code has no catalog entry, but its byte pattern coincidentally matches a Generic V33 parameter-tree path — see frame summary for the match; almost certainly not the actual fault name",
+        expert.group.UNDECODED, expert.severity.NOTE),
 }
 rnet.experts = {
     pe.sentinel_unknown_subtype,
@@ -333,6 +362,8 @@ rnet.experts = {
     pe.bt_unlock_pattern_b,
     pe.bt_unlock_sequence,
     pe.dormant_chair_listened,
+    pe.unresolved_fault_code,
+    pe.fault_code_paramtree_hint,
 }
 
 -- User preference: show provenance info (evidence kind + source citation)
@@ -666,6 +697,7 @@ local known_xor_tables = {
 }
 
 local error_codes = {}        -- 818 entries; populated near end of file (see "Big lookup tables")
+local error_codes_paramtree_hint = {} -- 10 entries; populated near end of file (paramtree-coincidence hints surfaced via expert-info only — see decode_pop_xtd's status-error handler)
 
 
 -- Mode-config payload format per Type byte. Evidence:
@@ -1332,21 +1364,64 @@ end
 -- Extended-ID POP frame: ((CAN ID >> 18) & 0x7E0) == 0x780.
 -- Bits 21-18 = node (4), 17-16 = TC (2), 15-0 = SegmentNumber. All 8 data
 -- bytes are segment payload — no command byte. Per same source.
+--
+-- Segmented-transfer family identification (per rnet-firmware
+-- RNET_TRANSFER_FAMILIES.md):
+--
+--   Family A (Programmer-driven, EVIDENCED by S11 + S10):
+--     0x1E3CXXXX = header / setup frame
+--     0x1E4DXXXX = data segment
+--     0x1E4EXXXX = data segment
+--     0x1E4FXXXX = data segment (often terminator)
+--
+--   Family B (chair-internal, segment-base selector UNVERIFIED):
+--     0x1E46XXXX = data segment
+--     0x1E4AXXXX = data segment
+--
+--   Family A vs Family B never co-occur empirically.
+--
+-- The (TC, node, segment) structural decode is identical across
+-- families; the family label adds operational context — "this is
+-- part of the Programmer-driven write you're investigating" vs
+-- "this is internal chair traffic the Programmer isn't part of".
+local function _pop_xtd_family(cid)
+    local prefix = bit.band(bit.rshift(cid, 16), 0xFFFF)
+    if prefix == 0x1E3C then
+        return "Family A header (Programmer-driven setup)"
+    elseif prefix == 0x1E4D or prefix == 0x1E4E or prefix == 0x1E4F then
+        return "Family A data segment (Programmer-driven)"
+    elseif prefix == 0x1E46 or prefix == 0x1E4A then
+        return "Family B data segment (chair-internal)"
+    end
+    return nil
+end
+
 local function decode_pop_xtd(tvb, t, cid)
     local node    = bit.band(bit.rshift(cid, 18), 0xF)
     local tc      = bit.band(bit.rshift(cid, 16), 0x3)
     local seg     = bit.band(cid, 0xFFFF)
-    t:add(pf.class, "POP (extended-ID)")
+    local family  = _pop_xtd_family(cid)
+    if family then
+        t:add(pf.class, string.format("POP (extended-ID) — %s", family))
+    else
+        t:add(pf.class, "POP (extended-ID)")
+    end
     t:add(pf.pop_this, node)
     t:add(pf.pop_this_str, slot_name(node)):set_generated()
     t:add(pf.pop_tc, tc)
     t:add(pf.pop_tc_str, tc_name(tc, true)):set_generated()
     t:add(pf.pop_segment, seg)
     t:add(pf.pop_is_last, (tc == 3)):set_generated()
+    local family_suffix = family and string.format("  [%s]", family) or ""
     t:add(pf.summary, string.format(
-        "POP-ext to %s  %s  seg=%d",
-        slot_name(node), tc_name(tc, true), seg))
-    add_evidence(t, "Code", "DongleInterface.dll CPOPMsg class (Ghidra)")
+        "POP-ext to %s  %s  seg=%d%s",
+        slot_name(node), tc_name(tc, true), seg, family_suffix))
+    if family then
+        add_evidence(t, "Code",
+            "DongleInterface.dll CPOPMsg class (Ghidra) + family identification per rnet-firmware RNET_TRANSFER_FAMILIES.md (Family A EVIDENCED via S11 + S10; Family B segment-base selector UNVERIFIED)")
+    else
+        add_evidence(t, "Code", "DongleInterface.dll CPOPMsg class (Ghidra)")
+    end
     return "POPxtd"
 end
 
@@ -2048,9 +2123,14 @@ local function decode_xtd(tvb, t, cid, is_rtr)
     elseif bit.band(cid, 0xFFFFF0F0) == 0x140C0000 then
         -- Payload empirically DLC=2: bytes 0-1 are a BE u16 error code.
         -- Cross-referenced against open-rnet/docs/RNET_ERROR_CODES.md
-        -- (302 entries from "PGDT R-net Error Code List with Remedies v1").
+        -- + rnet-firmware Generic V33_1_1375 .rnd extraction
+        -- (PARSE_DECODER_VALIDATION.md). When a code resolves only via
+        -- a parameter-tree-path coincidence (almost certainly NOT a
+        -- real fault name), we surface the hint via expert-info
+        -- rather than claiming it as the fault label — see
+        -- error_codes_paramtree_hint table.
         local slot = bit.band(bit.rshift(cid, 8), 0xF)
-        t:add(pf.class, "Status / error")
+        local class_item = t:add(pf.class, "Status / error")
         t:add(pf.slot, slot)
         if tvb:len() >= 2 then
             local code = tvb(0,1):uint() * 256 + tvb(1,1):uint()
@@ -2064,11 +2144,21 @@ local function decode_xtd(tvb, t, cid, is_rtr)
             elseif code == 0 then
                 t:add(pf.summary, string.format("Status slot=%X (no fault)", slot))
             else
-                t:add(pf.summary, string.format(
-                    "⚠ Status slot=%X code=0x%04X (undocumented)", slot, code))
+                -- Unresolved fault — check for a paramtree-coincidence hint
+                local hint = error_codes_paramtree_hint[code]
+                if hint then
+                    t:add(pf.summary, string.format(
+                        "⚠ Status slot=%X code=0x%04X (no catalog entry — paramtree-coincidence hint: %q, almost certainly NOT the fault name)",
+                        slot, code, hint))
+                    class_item:add_proto_expert_info(pe.fault_code_paramtree_hint)
+                else
+                    t:add(pf.summary, string.format(
+                        "⚠ Status slot=%X code=0x%04X (no catalog entry — rare; please share)", slot, code))
+                end
+                class_item:add_proto_expert_info(pe.unresolved_fault_code)
             end
         end
-        add_evidence(t, "Documented", "rnet_utils.py:437 + open-rnet docs/RNET_ERROR_CODES.md (302 entries); both community RE — no primary-source decode of the error-code semantics yet")
+        add_evidence(t, "Documented", "open-rnet docs/RNET_ERROR_CODES.md (~302 entries from PGDT 2009 catalog) + rnet-firmware Generic V33_1_1375 .rnd extraction (PARSE_DECODER_VALIDATION.md); both community-derived — no primary-source decode of the error-code semantics yet")
         return "Status"
     elseif cid == 0x0C280000 then
         -- "PM connected" sentinel — sent once by PM after the serial-number
@@ -3250,6 +3340,45 @@ error_codes = {
     [0xB009] = "Joystick Port 1 Mid Reference Error",
     [0xD009] = "Joystick Port 2 Mid Reference Error",
     [0xFFFF] = "Module Error: Module reporting Error may need repair",
+
+    -- ── ADDITIONS 2026-05-24 from rnet-firmware Generic V33_1_1375 ──
+    -- Resolved against corpus-observed "(undocumented)" codes per
+    -- rnet-firmware/docs/PARSE_DECODER_VALIDATION.md. Param-tree-path
+    -- byte-pattern matches deliberately NOT added here (see
+    -- error_codes_paramtree_hint below — surfaced via expert-info
+    -- only because almost certainly coincidental, not real fault names).
+    -- The `[likely]` suffix marks MEDIUM-confidence matches:
+    [0x0088] = "Indicators Open Circuit",
+    [0x1B00] = "Positive Current Feedback Clamp Bad [likely]",
+    [0x3700] = "Normalisation Overflow [likely]",
+    [0x4500] = "Repeated Single Byte Read Timeout [likely]",
+    [0x4600] = "Repeated Bulk Write Timeout [likely]",
+    [0x4D00] = "Tremor [likely]",
+    [0x4F00] = "Root Menu Empty [likely]",
+    [0x5F00] = "Cant Find Controller [likely]",
+    [0x7500] = "Tiller Comms Timeout [likely]",
+}
+
+-- Coincidental byte-pattern matches against Generic V33 .rnd's
+-- parameter-tree-path table. The .rnd's relational layout doesn't
+-- expose table boundaries; the byte pattern at fault-code positions
+-- can coincidentally match a parameter-path string in a different
+-- table. These are NOT fault names — the .rnd's parameter-tree-path
+-- table happens to contain a string whose bytes match the wire
+-- fault code. Surfaced via expert-info marker only (not the primary
+-- decode label) so an analyst sees the coincidence as a hint while
+-- understanding it's almost certainly not the actual fault meaning.
+error_codes_paramtree_hint = {
+    [0x0084] = "Controls~Profiled",
+    [0x0086] = "Seating~Intelligent Seating Module~Axes Setup",
+    [0x008A] = "Inhibits~Inputs - PM",
+    [0x008B] = "Inhibits~Inputs - ISM",
+    [0x6A00] = "Inhibits~Actuator Inhibits~Channel 1",
+    [0x8300] = "Controls~Global",
+    [0x8D00] = "Inhibits~Actuator Inhibits",
+    [0x9E00] = "Configuration~Modes",
+    [0xA100] = "Controls~Joystick",
+    [0xA800] = "Speeds~Global",
 }
 
 -- Permobil PWC param_id → parameter name map (966 entries)
