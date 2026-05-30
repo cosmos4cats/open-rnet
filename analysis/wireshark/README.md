@@ -503,152 +503,28 @@ Once you internalize the CAN basics:
 
 ## Evidence policy
 
-R-Net's protocol has been reverse-engineered across several distinct
-streams. They are NOT equally authoritative:
+Every decode is tagged with **how it was derived** — so you can tell a
+firmware-confirmed fact from an educated guess. The tags are hidden by default
+(most readers want the protocol, not the audit); a one-click preference reveals
+them with their source citation.
 
-1. **Primary-source firmware decompiles** (most authoritative): direct
-   Ghidra/ilspycmd decompiles of vendor binaries — `DongleInterface.dll`
-   (v5/v6), `RNet Programmer6 DLR.exe`, `IRConfigurator.exe` (.NET),
-   `LEDJSM` HCS12 firmware, `BTMouse` MC9S12X firmware. These tell us
-   what the vendor's own code actually does. This work lives in a
-   private follow-up tree and is referenced here as `DongleInterface.dll
-   FuncName @ 0xNNNN` citations.
+| Tier | Rules | What it means | Trust |
+|------|------:|---------------|-------|
+| Code | 18 | Primary source — a vendor-binary decompile (`DongleInterface.dll`, the Programmer EXE, `IRConfigurator.exe`, LEDJSM/BTMouse firmware) cited as `Func @ 0xNNNN`, or a match against the wire itself (e.g. a known XOR table). | Authoritative — the vendor's own code. |
+| Documented | 36 | Community RE — open-rnet's decoders and specs (`rnet_utils.py`, `RNET_PROTOCOL_SPECIFICATION.md`, …) plus field dictionaries. Independently seen to work, but derivative; community RE (open-rnet included) has known errors. | Likely correct — verify if you depend on it. |
+| Inferred | 8 | No direct source — family-analogy from a documented neighbor, a structural guess from bit patterns, or a hackathon-only observation. | A hint, not a fact — never for safety-critical use. |
 
-2. **Community reverse-engineering**: the open-rnet repo itself —
-   `tools/rnet_utils.py`, `analysis/protocol/extract_config_data.py`,
-   `docs/RNET_PROTOCOL_SPECIFICATION.md`, `docs/RNET_ERROR_CODES.md`,
-   etc. These have been independently observed-to-work against real
-   captures but are themselves derivative RE, not primary. **They
-   contain known errors** — for example, primary-source RE has shown
-   that open-rnet's BTMouse MCU identification (claimed HCS08, actually
-   MC9S12X), its 96.8% BTMouse/LEDJSM similarity claim (actual ≈33%),
-   and its BTMouse 0x0160 "encryption key" interpretation (actually a
-   Bluetooth link key, per open-rnet's own later assessment) are
-   wrong. Treat open-rnet as a useful starting hypothesis, not a fact.
+Counts are per *rule*, not per frame — one `Code` rule may cover thousands of
+frames, one `Inferred` rule a handful. `Inferred` entries graduate to
+`Documented`/`Code` as captures and firmware dumps confirm them.
 
-3. **Community dictionaries and prose**: janschu99 `RNETdictionary.txt`,
-   `RNETcanframe_diary.txt`, `RNET_FRAME_DICTIONARY.md`. Careful
-   observational work but never authoritative on its own.
+**Turn the tags on** (off by default):
 
-4. **Wire captures + parse cross-corpus pattern analysis**: empirical
-   facts about what frames appear, with what payloads, in what
-   sequences — primary in a different sense (the wire data is
-   ground truth) but interpretation can be wrong.
-
-### Evidence-kind labels
-
-Every decode rule in the dissector is tagged with **how it was derived**.
-The labels are hidden by default — most readers want to see the
-protocol, not audit it — but a one-click preference reveals them
-alongside the source citation when you want to verify a claim.
-
-#### The three labels
-
-- **`Code`** — derived from primary-source firmware decompile. Specifically:
-  - Ghidra/ilspycmd decompile of a vendor binary (DongleInterface.dll,
-    DLR EXE, IRConfigurator.exe, LEDJSM/BTMouse firmware) with the
-    cited function name + address, OR
-  - Empirical cross-validation against the wire data itself
-    (XOR-table match against a known network, BTMouse CAN-ID match
-    table at a specific firmware offset).
-
-  Note: a previous version of this dissector treated `rnet_utils.py`
-  and open-rnet docs as `Code` because they're "runnable code." Per
-  cross-source audit (2026-05-24), open-rnet is community-derivative
-  RE, not primary, so those citations have been re-tiered to
-  `Documented`.
-
-- **`Documented`** — derived from a community-RE source. Trustworthy
-  starting point but not authoritative:
-  - open-rnet decoders (`rnet_utils.py`, `extract_config_data.py`,
-    `parse_auth_frame_id`) and specs (`RNET_PROTOCOL_SPECIFICATION.md`,
-    `RNET_ERROR_CODES.md`, `RNET_FRAME_DICTIONARY.md`)
-  - Community dictionaries (janschu99's `RNETdictionary.txt`,
-    `RNETcanframe_diary.txt`, categorized variant)
-  - parse's own per-Type empirical decode (e.g., `decode_mode_config`)
-    where no primary-source decoder exists
-
-  Treat as likely-correct; verify if your application depends on it.
-  In several cases (noted above and at the cited line in the dissector)
-  open-rnet has been confirmed-wrong by primary-source RE.
-
-- **`Inferred`** — no direct source backs the decode; the rule
-  exists because of one of:
-  - Family-analogy from a documented neighbor (`STD 0x051` decoded
-    like `STD 0x050` because they're adjacent and look structurally
-    similar)
-  - Structural hypothesis from observed bit patterns
-  - Conjectural positional pairing (e.g., the three Meyra `.rnd`
-    error names where the descriptor-to-display pairing isn't yet
-    confirmed)
-  - Hackathon-only observations not yet matched against another
-    source
-
-  Inferred decodes commonly carry a `chair-emitted confirmed by
-  N-source dealer-side zero-hit sweep` note in their evidence source
-  — that's a negative-finding confirmation of *direction* (which
-  module emits the frame), not of the *semantic* (what the payload
-  bytes mean).
-
-  Treat as a hint, not a fact. Useful for getting some signal out of
-  otherwise-unknown frames; not a basis for safety-critical code.
-
-#### Current distribution (as of 2026-05-24, post-audit)
-
-Across 62 evidence-tagged decode rules in the dissector:
-
-| Kind        | Count | %    |
-|-------------|------:|-----:|
-| Code        |    18 | 29%  |
-| Documented  |    36 | 58%  |
-| Inferred    |     8 | 13%  |
-
-(Distribution shifted significantly on 2026-05-24 after a primary-source
-audit reclassified open-rnet-citing rules from `Code` to `Documented`.
-See "Evidence policy" above. The dissector's decode coverage is
-unchanged — what changed is the honest accounting of which decodes
-rest on primary firmware decompiles versus community RE.)
-
-These percentages move as research progresses — `Inferred` entries
-tend to become `Documented` or `Code` over time when a wire capture
-or firmware dump confirms a hypothesis. (Counts are per *rule*, not
-per frame; one `Code` rule might cover thousands of frames while one
-`Inferred` rule covers a handful.)
-
-#### Enabling the labels
-
-The labels are off by default. Two equivalent ways to turn them on:
-
-**In Wireshark (GUI):** Edit → Preferences → Protocols → RNET →
-check "Show evidence + confidence" → OK. The setting persists.
-
-**In tshark (CLI):** add `-o rnet.show_evidence:TRUE` to any command:
-
-```sh
-tshark -o rnet.show_evidence:TRUE \
-       -r captures/2026_AT_hackathon.log -V -Y 'frame.number==70'
-```
-
-Each frame's expanded detail will then include two extra fields:
-
-```
-[Evidence kind (Code/Documented/Inferred): Code]
-[Evidence source: rnet_utils.py:279]
-```
-
-To turn off again: uncheck the GUI preference, or omit the `-o` flag.
-
-#### Useful filters once enabled
-
-```sh
-# Everything the dissector isn't sure about:
-tshark -o rnet.show_evidence:TRUE \
-       -r capture.pcapng -Y 'rnet.confidence == "Inferred"'
-
-# Show only well-sourced decodes:
-tshark -o rnet.show_evidence:TRUE \
-       -r capture.pcapng -Y 'rnet.confidence == "Code"'
-```
+- **Wireshark:** Edit → Preferences → Protocols → RNET → check "Show evidence + confidence".
+- **tshark:** add `-o rnet.show_evidence:TRUE`. Each frame then carries
+  `[Evidence kind: Code]` + `[Evidence source: rnet_utils.py:279]`, so you can
+  filter `rnet.confidence == "Inferred"` (everything uncertain) or `"Code"`
+  (only firmware-confirmed).
 
 ## R-Net, ReBus, POP — three names, three different things
 

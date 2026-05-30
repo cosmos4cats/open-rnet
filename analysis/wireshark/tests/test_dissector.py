@@ -883,6 +883,24 @@ def test_version_line_present_and_stampable():
     )
 
 
+def test_pop_odi_8b_labeled_config_crc():
+    """ODI 0x8b is the repository file-slot 'Check' accessor; its u16 value
+    is the controller's config-slot CRC — the .R-net file's 0x1A header
+    checksum, read over the wire via GetCRCFromSystem (POP read/write at the
+    repository node). Verified: 0x8b carries high-entropy CRC-shaped u16s in
+    programmer read/verify sessions. This is the 'show the user a meaningful
+    value off the wire' decode."""
+    if not have_capture("programmer_write"):
+        pytest.skip("programmer_write capture not present")
+    rows = fields("programmer_write",
+                  "rnet.pop.odi == 0x8b && rnet.pop.value16",
+                  ["rnet.pop.register_name", "rnet.pop.value16"])
+    assert rows, "no 0x8b frames with a value found"
+    assert all("config slot CRC" in r[0] for r in rows), (
+        f"0x8b frames must be labeled the config-slot CRC: {rows[:3]}"
+    )
+
+
 def test_decode_rtc_broadcast_field_values():
     """0x1C2C0X00 is the chair's Real-Time Clock periodic broadcast
     (per DongleInterface.dll DecodeRTCBroadcast + Programmer EXE

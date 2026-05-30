@@ -802,20 +802,31 @@ local mode_type_names = {
 }
 
 -- POP register-byte names (data[1] = low byte of ODI). Per
--- RNET_PROTOCOL_SPECIFICATION.md §8.3 Register Types. Most-common values
--- in the corpus are 0x80 PAGE0, 0x81 POINTER, 0x8C TEXT, 0x8F DATA;
--- other 0x8X values appear (0x84, 0x85, 0x88, 0x89, 0x8A, 0x8B) but
--- aren't documented in §8.3.
+-- RNET_PROTOCOL_SPECIFICATION.md §8.3 Register Types (0x80 PAGE0,
+-- 0x81 POINTER, 0x8C TEXT, 0x8F DATA).
+--
+-- 0x8B is the repository file-slot "Check" accessor — its u16 value IS
+-- the controller's config-slot CRC, i.e. the .R-net file's 0x1A header
+-- checksum. Source: the DongleInterface.dll file-slot ODI table
+-- (GetFileSlot 0x81 / Location 0x85 / Size 0x86 / FileVersion 0x89 /
+-- FileAttributes 0x8A / Check[CRC] 0x8B / Verify 0x8F), all to the
+-- repository node (GetCRCFromSystem = WriteGetFileSlot 0x81 + ReadSlotCheck
+-- 0x8B). parse-verified: 0x8B carries high-entropy CRC-shaped u16s
+-- (0xc2af/0x9288/0x6517/0x54f6/…) in programmer read/verify sessions.
+-- NB: 0x81/0x8C/0x8F are CONTEXT-DUAL — the §8.3 register meaning in
+-- parameter transfers vs the file-slot accessor at the repository node —
+-- so only 0x8B (unclaimed by the §8.3 model, CRC-unambiguous) is named here.
 local pop_register_names = {
     [0x80] = "PAGE0",
     [0x81] = "POINTER",
+    [0x8B] = "config slot CRC (Check; = .R-net 0x1A header checksum)",
     [0x8C] = "TEXT",
     [0x8F] = "DATA",
 }
 -- POP register bytes seen empirically but not in §8.3.
 local pop_register_undocumented = {
     [0x84] = true, [0x85] = true, [0x86] = true, [0x88] = true,
-    [0x89] = true, [0x8A] = true, [0x8B] = true,
+    [0x89] = true, [0x8A] = true,
 }
 
 local pwc_params = {}         -- 966 entries; populated near end of file
