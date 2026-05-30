@@ -865,6 +865,24 @@ def test_auth_device_serial_no_splice_across_hotplug():
     )
 
 
+def test_version_line_present_and_stampable():
+    """`make install` rewrites the `local RNET_VERSION = "..."` line in the
+    installed copy with a git-derived version (date + short-SHA of the last
+    commit that touched rnet_can.lua). If that line is renamed or removed the
+    installer silently stops stamping — installed copies would all report
+    "dev". Guard the contract: the stampable line exists and is wired into
+    set_plugin_info so Wireshark surfaces it."""
+    lua = Path(LUA).read_text()
+    assert re.search(r'^local RNET_VERSION = "[^"]*"', lua, re.M), (
+        'the stampable line `local RNET_VERSION = "..."` is missing — '
+        "make install can no longer stamp the version"
+    )
+    assert "set_plugin_info" in lua and "version = RNET_VERSION" in lua, (
+        "RNET_VERSION must be passed to set_plugin_info so the version shows "
+        "in Help > About > Plugins"
+    )
+
+
 def test_decode_rtc_broadcast_field_values():
     """0x1C2C0X00 is the chair's Real-Time Clock periodic broadcast
     (per DongleInterface.dll DecodeRTCBroadcast + Programmer EXE

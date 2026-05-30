@@ -112,7 +112,11 @@ cp analysis/wireshark/rnet_can.lua ~/.local/lib/wireshark/plugins/
 
 Restart Wireshark (or run `tshark` afresh) and the dissector loads
 automatically. Verify in Wireshark: **Help → About → Plugins** should
-list `rnet_can.lua`.
+list `rnet_can.lua` with its version — the commit date plus a short SHA of
+the last change to the dissector (format `YYYY-MM-DD <short-sha>`), which
+`make install` stamps into the installed copy so a bug report can be tied
+to an exact tree state. A copy installed from a modified working tree is
+marked `-dirty`.
 
 ### For development — the Makefile
 

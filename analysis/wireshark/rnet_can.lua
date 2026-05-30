@@ -78,6 +78,22 @@
 
 local rnet = Proto("rnet", "R-Net (Curtiss-Wright / PGDT)")
 
+-- Version surfaced in Wireshark's Help > About > Plugins (and
+-- `tshark -G plugins`). The source carries the neutral placeholder "dev";
+-- `make install` rewrites THIS line in the installed copy with the date +
+-- short-SHA of the last commit that touched rnet_can.lua
+-- (`git log -1 --format='%cs %h' -- rnet_can.lua`, plus `-dirty` if built
+-- from a modified working tree). So the version tracks *code changes*, not
+-- build time — two installs of the same commit produce the same string —
+-- and an installed copy (which is detached from git) self-identifies
+-- exactly. Keep this on one line as `local RNET_VERSION = "..."` so the
+-- installer's sed can find it.
+local RNET_VERSION = "dev"
+if set_plugin_info then
+    set_plugin_info({ version = RNET_VERSION,
+                      description = "R-Net (Curtiss-Wright / PGDT) CAN dissector" })
+end
+
 -- ProtoFields -----------------------------------------------------------------
 local pf = {
     class       = ProtoField.string("rnet.class",       "Frame class"),
