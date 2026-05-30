@@ -861,7 +861,7 @@ Filter `rnet.auth.network` to see only the successfully-validated
 responses; filter `rnet.class contains "challenge"` to see the
 in-progress challenge phase.
 
-### Service operations — now mapped (upstream-RE ANSWERS Q1)
+### Service operations — now mapped
 
 The earlier "service opcodes 0x00–0x07 ride inside service frames"
 framing was imprecise. Per the `CServiceManager::ServiceCANMsg @
@@ -1541,7 +1541,7 @@ firmware-version-aware lookup would remove the caveat.
 Three things, none of which are solved today:
 
 1. **A reliable signal in wire traffic that identifies firmware
-   version.** Largely resolved (upstream-RE ANSWERS Q3): the chair
+   version.** Largely resolved: the chair
    answers a deterministic on-wire version query —
    **`ReadSWVersion` = a POP read of ODI `0xC4`** returning a u16
    software version, with **`ReadHWVersion` = ODI `0xC3`** for hardware
@@ -1662,7 +1662,7 @@ panel (severity: Warning) so you can't miss them. The current
 
 | What | Pattern | Why it's interesting |
 |---|---|---|
-| **BT-pairing-unlock Pattern A (seed frame)** | Extended CAN frame, `(id & 0x3FFFF) == 0x07E57` (DLC and data unconstrained; bits 17:16 must be 0, top 11 bits free) | First frame of a TWO-frame unlock sequence per BTMouse handler `0xF50E`. The chair-side bit-shuffle leaves the magic bytes `0x57 0x7E 0x00` in the firmware's internal buffer at RAM `0x329A/B/C`. NOTE-severity marker on its own (the pattern could be incidental in some traffic) — pair with Pattern B below to see the full sequence. Datasheet-verified per `BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md` (upstream-RE T59). |
+| **BT-pairing-unlock Pattern A (seed frame)** | Extended CAN frame, `(id & 0x3FFFF) == 0x07E57` (DLC and data unconstrained; bits 17:16 must be 0, top 11 bits free) | First frame of a TWO-frame unlock sequence per BTMouse handler `0xF50E`. The chair-side bit-shuffle leaves the magic bytes `0x57 0x7E 0x00` in the firmware's internal buffer at RAM `0x329A/B/C`. NOTE-severity marker on its own (the pattern could be incidental in some traffic) — pair with Pattern B below to see the full sequence. Datasheet-verified per `BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md`. |
 | **BT-pairing-unlock Pattern B (trigger frame)** | Standard CAN frame, ID == `0x07A0` EXACTLY, DLC=8, ALL 8 data bytes zero | Second frame of the sequence — fires the unlock IF Pattern A primed the buffer recently AND the runtime flag at `0xFF4C4` is set (banked code decides this). NOTE-severity marker per-frame. The frame's class label is also re-flagged from the default "Programmer presence" to make the magic-pattern match visible without expert-info enabled. (Earlier interpretations listed 8 candidate IDs with low byte 0xA7; the datasheet-verified disassembly of FUN_00430E narrows the trigger to exactly 0x07A0.) |
 | **BT-pairing-unlock full sequence (Pattern A → Pattern B)** | Pattern B arrives within ~1s of a Pattern A on the same bus | The actually-interesting case. WARN-severity marker fires on the Pattern B frame. The handler then calls a banked function whose effect we can't statically see — likely BT pairing enable, factory test mode, or service-only parameter writes. |
 | **Dormant chair-listened STD CAN IDs** | STD `0x001`, `0x00A`, `0x0F0`, `0x7C0`, `0x7E0`, `0x7E4`, `0x7E8`, `0x7EC` | All appear in BTMouse's literal CAN-ID table at flash `0x56E0-0x571B` (cross-validated against LEDJSM HCS12 at flash `0x57C8+`) — the chair has CAN-ID match-table / dispatch entries ready to react. But none of these IDs has ever appeared in any of the 30 captures in parse's corpus. Likely candidates: factory/diagnostic frames, service-tool triggers, or planned-but-not-shipped variants. |

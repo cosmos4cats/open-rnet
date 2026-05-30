@@ -65,7 +65,7 @@
 --   So when a source has zero hits for a frame ID, the next place to look
 --   is the target module's own firmware, not "we got it wrong."
 --
---   RETRACTED (upstream-RE 04655cbb, 2026-05-29): an earlier version of
+--   RETRACTED (2026-05-29): an earlier version of
 --   this note claimed the 29-bit ID encodes a "Device-Type-ID" in its
 --   high bits (0x6380 = LEDJSM, 0x0000 = BT-Mouse), citing a LEDJSM
 --   "MSCAN_RX_ISR @ 0x449C" plate comment plus a banked dispatch at
@@ -287,8 +287,8 @@ local pe = {
     -- RAM 0x329A/B/C. Those residual bytes are part of what the
     -- unlock handler 0xF50E checks when a subsequent Pattern B
     -- (trigger) frame arrives. Per
-    -- BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md (upstream-RE datasheet-
-    -- verified update, commit f4197494). DLC and data bytes are
+    -- BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md (upstream-RE
+    -- datasheet-verified update). DLC and data bytes are
     -- unconstrained for Pattern A. Marked NOTE severity because if
     -- Pattern A's bit-pattern turns out to be incidental in normal
     -- extended traffic, this would be noisy.
@@ -299,8 +299,8 @@ local pe = {
 
     -- BT-pairing-unlock protocol — Pattern B (the TRIGGER frame).
     -- STANDARD CAN frame, ID == 0x7A0 EXACTLY, DLC=8, all 8 data
-    -- bytes zero. Per upstream-RE commit f4197494 (datasheet-
-    -- verified via HCS12 S12CPUV2 Reference Manual): FUN_00430E's
+    -- bytes zero. Per upstream-RE (datasheet-verified via
+    -- HCS12 S12CPUV2 Reference Manual): FUN_00430E's
     -- bit-shuffle for standard frames reconstructs the 11-bit CAN
     -- ID into the X register (X high = ID[10:8], X low = ID[7:0]).
     -- The magic check requires X = 0x07A0 after `& 7` mask on X
@@ -331,7 +331,7 @@ local pe = {
     -- side unlock sequence (modulo the runtime flag, which we can't
     -- observe from the wire).
     --
-    -- *** ASSUMPTION + follow-up question for upstream-RE: ***
+    -- *** ASSUMPTION (unconfirmed): ***
     -- The 1-second correlation window is a guess. The chair-side
     -- buffer at 0x329A/B/C presumably persists until the next
     -- extended frame overwrites it. If there's no extended-frame
@@ -637,7 +637,7 @@ end
 -- can't observe). Track the most-recent Pattern A timestamp + cache
 -- which Pattern B frames fired the sequence (for re-pass display).
 --
--- *** ASSUMPTION + follow-up question for upstream-RE: ***
+-- *** ASSUMPTION (unconfirmed): ***
 -- The 1.0-second correlation window is a guess. The chair-side
 -- buffer at 0x329A/B/C persists until overwritten by the next
 -- extended-frame's bit-shuffle. On a quiet bus that could be much
@@ -1262,15 +1262,15 @@ local function decode_pop_std(tvb, t, cid, pinfo)
             -- Block = data[7]. EXCEPTION: when byte 0 = 0x8F (COMPLETE
             -- response), bytes 4-5 carry the embedded CRC-16/CCITT-FALSE
             -- of the just-completed transfer's data, per CPOPMsg::SetCRC @
-            -- 0x10002610 (external RE notes R4 reply). Empirically verified
+            -- 0x10002610 (external RE notes). Empirically verified
             -- against programmer_write capture: 13-byte TEXT data block
             -- produces CRC 0x6F36 matching frame 270's d[4..5] LE.
             local odi = tvb(1,1):uint() + tvb(2,1):uint()*256 + tvb(3,1):uint()*65536
             local sz  = tvb(4,1):uint() + tvb(5,1):uint()*256 + tvb(6,1):uint()*65536
             t:add(pf.pop_odi,  tvb(1,3), odi)
             -- Version reads: a Read request (POP_MSG_TYPE 5 = TC=1, no Quick/CRC)
-            -- of ODI 0xC4 = SW version, 0xC3 = HW version (upstream-RE ANSWERS
-            -- Q1/Q3; CRnetInterface::ReadSWVersion @ 0x1000b950). Gating on the
+            -- of ODI 0xC4 = SW version, 0xC3 = HW version
+            -- (CRnetInterface::ReadSWVersion @ 0x1000b950). Gating on the
             -- read TYPE — not the ODI value alone — avoids false positives on
             -- segmented transfers that coincidentally carry ODI 0xC4.
             if msg_type == "Read request (type 5)" then
@@ -1614,7 +1614,7 @@ local function decode_mode_config(tvb, t, cid)
         detail = "  params=" .. bytes_to_hex(tvb, 0, 8)
     elseif typ == 0x61 and tvb:len() >= 8 then
         -- Extended mode data per cJSM display-protocol notes. Per
-        -- external RE notes R3.5 F6: byte order is MIXED — example payload
+        -- external RE notes: byte order is MIXED — example payload
         -- 0001028000400200 decodes only if bytes 2-3 are BE and bytes 6-7
         -- are LE (different fields owned by different protocol layers).
         -- Bytes 0-1 layout is ambiguous in the doc; show as raw pair.
@@ -1807,8 +1807,8 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         -- upstream-RE RNET_FRAME_GLOSSARY.md (Programmer-presence
         -- entry).
         --
-        -- Datasheet-verified rare case (per upstream-RE commit
-        -- f4197494): STD 0x07A0 + DLC=8 + all-zero is the actual
+        -- Datasheet-verified rare case (per upstream-RE):
+        -- STD 0x07A0 + DLC=8 + all-zero is the actual
         -- Pattern B trigger of the BTMouse unlock protocol. The
         -- main BT-unlock pattern detection runs after this handler
         -- and attaches the expert-info marker; we surface the
@@ -1827,7 +1827,7 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
                 t:add(pf.summary,
                     "BTMouse-internal unlock-protocol Pattern B (TRIGGER) — fires the BTMouse-side unlock if a Pattern A seed was sent recently AND runtime flag 0xFF4C4 is set. DISTINCT from the dongle's 0x08280F02 R-Net Unlock (which targets PM/SM chair-controller, not BTMouse).")
                 add_evidence(t, "Code",
-                    "BTMouse MC9S12X handler 0xF50E + datasheet-verified FUN_00430E LEAX D,X disassembly (BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md / upstream-RE commit f4197494)")
+                    "BTMouse MC9S12X handler 0xF50E + datasheet-verified FUN_00430E LEAX D,X disassembly (BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md)")
                 return "BTUnlockB"
             end
         end
@@ -1848,7 +1848,7 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
     elseif cid == 0x080 or cid == 0x290 or cid == 0x305 or cid == 0x703 then
         -- R-Net service status frames dispatched by CServiceManager::
         -- ServiceCANMsg @ 0x10010140 (acts on unfiltered frames,
-        -- filter_type in {1,3}), per upstream-RE ANSWERS Q1. Concrete
+        -- filter_type in {1,3}). Concrete
         -- per-ID byte decodes from the v6 DongleInterface.dll decompile.
         -- None observed in parse's 30-capture corpus yet — these fire on
         -- future Programmer/service captures.
@@ -1873,7 +1873,7 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
                 "Service status byte (STD 0x703) = 0x%02X", d0))
         end
         add_evidence(t, "Code",
-            "CServiceManager::ServiceCANMsg @ 0x10010140 dispatch (DongleInterface.dll v6); per-ID byte decode from upstream-RE ANSWERS Q1 (0-corpus; fires on future service captures)")
+            "CServiceManager::ServiceCANMsg @ 0x10010140 dispatch (DongleInterface.dll v6); per-ID byte decode from the v6 DongleInterface.dll decompile (0-corpus; fires on future service captures)")
         return "Svc"
     elseif cid == 0x7B3 then
         t:add(pf.class, is_rtr and "Serial exchange request" or "Serial exchange")
@@ -1886,7 +1886,7 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         return "SerExch"
     elseif cid >= 0x040 and cid <= 0x04F then
         -- Param-page family extension. 0x040/041 documented (open/close).
-        -- 042-04F: round-3 reply suggested by analogy these are intermediate
+        -- 042-04F: by analogy these are intermediate
         -- param-page operations. The cluster 0x042/0x043/0x044 shows a
         -- strict 1:1 bit-31-only toggle (00000000↔80000000) lockstep
         -- across IDs in every capture — looks like a chair-side per-bus
@@ -1999,14 +1999,14 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         -- family literal CAN-ID table at BTMouse FW 0x56E0 (entry 0,
         -- value 0x07FA) AND at LEDJSM FW 0x57C8 (same byte sequence,
         -- cross-firmware verified). Per BTMOUSE_POP_DISPATCH_
-        -- PRIMARY_SOURCE.md §4 (revised in upstream-RE commit
-        -- dce1b296), this table is 28 entries × 2 bytes with format
+        -- PRIMARY_SOURCE.md §4 (revised in a later RE pass),
+        -- this table is 28 entries × 2 bytes with format
         -- {flag_nibble : 4 bits, CAN_ID : 12 bits} — every entry
         -- decodes as a valid CAN ID with zero outliers, the table
         -- contains many known-good IDs that parse already decodes
         -- (0x060 mode-change, 0x780/0x790 POP base, 0x7B0-0x7B6
         -- Config-mode, 0x7C0/0x7E0/0x7E4/0x7E8 POP family, 0x0F0
-        -- end-flags). NB (upstream-RE efdb4349, 2026-05-29, binary-
+        -- end-flags). NB (upstream-RE, 2026-05-29, binary-
         -- verified): this is a SOFTWARE-level CAN-ID match table consulted
         -- by the dispatch handlers — NOT the source data for the MSCAN
         -- hardware acceptance filter. The hardware filter is programmed
@@ -2014,7 +2014,7 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         -- single constant into CANIDAR0-7/CANIDMR0-7 (16 registers cannot
         -- hold a 28-entry table); that constant isn't resolved in the dump.
         --
-        -- NB: an earlier upstream-RE reply (commit 1b4fe705)
+        -- NB: an earlier upstream-RE note
         -- flagged a "provisional encoding" caveat that applied to a
         -- DIFFERENT structure — the 5-byte dispatch records at
         -- 0x5587 etc. that go through FUN_00430E bit-repack at match
@@ -2028,7 +2028,7 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         t:add(pf.class, "BTMouse sentinel (0x7FA)")
         t:add(pf.summary, "BTMouse-listened sentinel (chair-firmware-family-wide; emitter unidentified, semantic TBD)")
         add_evidence(t, "Code",
-            "BTMouse MC9S12X FW 0x56E0 entry 0 + LEDJSM HCS12 FW 0x57C8 (cross-firmware-verified literal CAN-ID table; BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §4, upstream-RE commit dce1b296)")
+            "BTMouse MC9S12X FW 0x56E0 entry 0 + LEDJSM HCS12 FW 0x57C8 (cross-firmware-verified literal CAN-ID table; BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §4)")
         return "BTMSent"
     else
         t:add(pf.class, string.format("Unknown STD 0x%03X", cid))
@@ -2077,7 +2077,7 @@ local function decode_xtd(tvb, t, cid, is_rtr, pinfo)
         -- Payload empirically constant 7×`0x87` (DLC=7, no trailing byte)
         -- across 1,978/1,978 hackathon-dump frames + open-rnet captures.
         -- Treat as a "JSM alive signature" with a validation check.
-        -- (upstream-RE c78f0f14 corrected an earlier "87×7 + 00" claim:
+        -- (a later RE pass corrected an earlier "87×7 + 00" claim:
         --  the frame is DLC=7, not DLC=8; an 8-byte JSM variant is
         --  possible but unobserved. The len>=7 / bytes-0..6 check below
         --  validates both cases robustly.)
@@ -2173,8 +2173,8 @@ local function decode_xtd(tvb, t, cid, is_rtr, pinfo)
         -- counter is the seconds field rolling 0..59, with byte 1
         -- (minutes) incrementing on each wrap.
         --
-        -- Direction discriminator = CAN-ID low byte (upstream-RE
-        -- e3777a4d / F5): 0x00 = chair→bus broadcast (nibble bits 11-8 =
+        -- Direction discriminator = CAN-ID low byte (upstream-RE):
+        -- 0x00 = chair→bus broadcast (nibble bits 11-8 =
         -- broadcasting module's slot ID); 0x01 = Programmer→chair
         -- clock-SET (built by RTC_EncodeSetClockFrame; slot nibble
         -- unused). Same 7-field payload both ways.
@@ -2216,7 +2216,7 @@ local function decode_xtd(tvb, t, cid, is_rtr, pinfo)
                 dow_names[dow] or "?",
                 2000 + year, month, day, hour, min, sec))
         end
-        add_evidence(t, "Code", "DongleInterface.dll DecodeRTCBroadcast @ 0x1000f8e0 (masks the function nibble — every 0x1C2C slot is RTC) + Programmer EXE FUN_004a5030; field order (sec=data[0]/min=data[1]/hour=data[2]) binary-confirmed by the outbound encoder RTC_EncodeSetClockFrame @ 0x1000fa20 (maps COleDateTime Second/Minute/Hour; builds the 0x1C2C0001 clock-SET frame — set-vs-broadcast direction split per e3777a4d/F5); + wall-clock cross-check, corpus-validated 463/463 frames in-range across slots 0x01-0x04, 18 captures")
+        add_evidence(t, "Code", "DongleInterface.dll DecodeRTCBroadcast @ 0x1000f8e0 (masks the function nibble — every 0x1C2C slot is RTC) + Programmer EXE FUN_004a5030; field order (sec=data[0]/min=data[1]/hour=data[2]) binary-confirmed by the outbound encoder RTC_EncodeSetClockFrame @ 0x1000fa20 (maps COleDateTime Second/Minute/Hour; builds the 0x1C2C0001 clock-SET frame — set-vs-broadcast direction split); + wall-clock cross-check, corpus-validated 463/463 frames in-range across slots 0x01-0x04, 18 captures")
         return "RTC"
     elseif bit.band(cid, 0xFFFF00FF) == 0x181C0000 then
         -- 0x181C0X00 cJSM/JSM device-class family. Function byte = X.
@@ -2397,14 +2397,14 @@ local function decode_xtd(tvb, t, cid, is_rtr, pinfo)
         -- byte 3 = instance/sub-index; single-byte payload looks like
         -- channel-nibble + sub-nibble) stay Inferred.
         --
-        -- (NB: an earlier upstream-RE reply attributed these to
+        -- (NB: an earlier RE note attributed these to
         -- "BTM HCS08" — that was based on a misidentified bootloader
         -- stub. BTMouse is actually MC9S12X-family.)
         local sub = bit.band(cid, 0xFFFF)
         t:add(pf.class, string.format("BTM family (sub 0x%04X) [unverified semantic]", sub))
         t:add(pf.summary, string.format("BTM family sub=0x%04X (chair→bus; emitter = BTMouse application layer, not in our partial BTMouse dump)", sub))
         add_evidence(t, "Inferred",
-            "family-analogy to documented BTM Control/Status; chair-emitted confirmed by 5-source dealer+chair-side zero-hit sweep (incl. BTMouse MC9S12X firmware); emitter = BTMouse application layer (upstream-RE ANSWERS Q6), which is NOT in our partial BTMouse dump (BT-radio/SCI0 + POP-dispatch only) — hence the expected zero-hit")
+            "family-analogy to documented BTM Control/Status; chair-emitted confirmed by 5-source dealer+chair-side zero-hit sweep (incl. BTMouse MC9S12X firmware); emitter = BTMouse application layer, which is NOT in our partial BTMouse dump (BT-radio/SCI0 + POP-dispatch only) — hence the expected zero-hit")
         return "BTMx"
     elseif bit.band(cid, 0xFFFFF0FF) == 0x1C200000 then
         -- Per janschu99 categorized dictionary line 52:
@@ -2601,7 +2601,7 @@ local function decode_xtd(tvb, t, cid, is_rtr, pinfo)
         -- FUN_10001260 @ 0x10001260 / v5 FUN_10001370) — mask
         -- 0xFFFFF0FF == 0x08080000, an 8-slot × 12-byte presence table;
         -- per-device state from bit 7 of data[0]. Per upstream-RE
-        -- ANSWERS Q1 + round-2 decode (RNET_FAMILY_DECODE_GAPS Gap #1).
+        -- RNET_FAMILY_DECODE_GAPS.md Gap #1.
         -- 0-corpus for parse; fires on future service captures.
         local slot = bit.band(bit.rshift(cid, 8), 0xF)
         local d0 = (tvb:len() >= 1) and tvb(0,1):uint() or 0
@@ -2612,7 +2612,7 @@ local function decode_xtd(tvb, t, cid, is_rtr, pinfo)
             "Device-presence beacon slot=%X %s (data[0]=0x%02X)",
             slot, present and "present" or "absent", d0))
         add_evidence(t, "Code",
-            "CServiceManager DecodePresenceBeacon_08080X00 (v6 FUN_10001260 @ 0x10001260 / v5 FUN_10001370); upstream-RE RNET_FAMILY_DECODE_GAPS.md Gap #1 + round-2 decode (0-corpus)")
+            "CServiceManager DecodePresenceBeacon_08080X00 (v6 FUN_10001260 @ 0x10001260 / v5 FUN_10001370); RNET_FAMILY_DECODE_GAPS.md Gap #1 (0-corpus)")
         return "Presence"
     else
         t:add(pf.class, string.format("Unknown XTD 0x%08X", cid))
@@ -2654,7 +2654,7 @@ function rnet.dissector(tvb, pinfo, tree)
 
     -- BT-pairing-unlock protocol pattern detection. Per
     -- BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md (upstream-RE datasheet-
-    -- verified update, commit f4197494). Runs after the regular
+    -- verified update). Runs after the regular
     -- decode so markers stack on top of whatever class label the
     -- frame already has.
     --
@@ -3100,7 +3100,7 @@ error_codes = {
     [0x1B01] = "Right Forward Current Null Bad",
     [0x1B02] = "Right Reverse Current Null Bad",
     [0x1B10] = "Positive Current Feedback Null Bad",
-    [0x1C00] = "M2 Motor Error [CONJECTURAL: Meyra .rnd descriptor #19 positional pairing]",  -- external RE notes commit faee2675
+    [0x1C00] = "M2 Motor Error [CONJECTURAL: Meyra .rnd descriptor #19 positional pairing]",  -- external RE notes
     [0x1C01] = "Left Forward Current Null Bad",
     [0x1C02] = "Left Reverse Current Null Bad",
     [0x1C10] = "Negative Current Feedback Null Bad",
@@ -3179,7 +3179,7 @@ error_codes = {
     [0x2300] = "No Pacesetter Reply",  -- [MEDIUM]
     [0x237E] = "Memory Error: Repository Taken",
     [0x2400] = "Bad Pacesetter Reply",  -- [MEDIUM]
-    [0x2500] = "Over Pressure [CONJECTURAL: Meyra .rnd descriptor #10 positional pairing]",  -- external RE notes commit faee2675
+    [0x2500] = "Over Pressure [CONJECTURAL: Meyra .rnd descriptor #10 positional pairing]",  -- external RE notes
     [0x247E] = "Memory Error: Repository Not Released",
     [0x257E] = "Memory Error: Set Values Get File Slot Error",
     [0x267E] = "Memory Error: Set Values Set Slot Location Error",
@@ -3202,7 +3202,7 @@ error_codes = {
     [0x2C02] = "Low Battery Voltage: Low Battery Lockout (<16v)",
     [0x2C7E] = "Memory Error: Get Values Slot Data Error",
     [0x2D00] = "Demand Drive Mismatch",  -- [MEDIUM]
-    [0x2E00] = "Overtemp. (Lamps) [CONJECTURAL: Meyra .rnd descriptor #27 positional pairing]",  -- external RE notes commit faee2675
+    [0x2E00] = "Overtemp. (Lamps) [CONJECTURAL: Meyra .rnd descriptor #27 positional pairing]",  -- external RE notes
     [0x2E68] = "Sets the time the input needs to be in a band before the inhibit is updated",  -- [MEDIUM]
     [0x2E7E] = "Memory Error: Get Size Get File Slot Error",
     [0x2F00] = "Input Recentering Fault",

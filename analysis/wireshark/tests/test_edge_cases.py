@@ -157,7 +157,7 @@ def test_bt_unlock_pattern_a_marker(edge_pcap_dir):
 
 def test_bt_unlock_pattern_b_marker(edge_pcap_dir):
     """Pattern B of the BTMouse two-frame unlock protocol — per the
-    datasheet-verified upstream-RE update (commit f4197494):
+    datasheet-verified RE update:
     STANDARD CAN frame, ID == 0x07A0 EXACTLY, DLC=8, ALL 8 data
     bytes zero. Fires a NOTE-severity marker. The frame's class
     label is also re-flagged from the default "Programmer presence"
@@ -207,7 +207,7 @@ def test_bt_unlock_pattern_b_marker(edge_pcap_dir):
 def test_bt_unlock_pattern_a_tightened_mask(edge_pcap_dir):
     """Pattern A's mask was tightened from (id & 0xFFFF) == 0x7E57
     to (id & 0x3FFFF) == 0x07E57 in the datasheet-verified update
-    (upstream-RE commit f4197494). The added bits 17:16 == 0
+    (datasheet-verified RE update). The added bits 17:16 == 0
     constraint must reject IDs that match the old (looser) mask but
     not the new (tighter) mask — e.g. an ID with bit 17 set."""
     proc = subprocess.run(

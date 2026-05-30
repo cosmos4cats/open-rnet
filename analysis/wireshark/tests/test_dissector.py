@@ -416,7 +416,7 @@ def test_decode_transfer_complete_sentinel():
 
 
 def test_decode_bit4_crc_flag_only_on_tc1_segment():
-    """Per upstream-RE R3.5 F7: CRCFlag is only ever seen on TC=1
+    """Per external RE: CRCFlag is only ever seen on TC=1
     segment frames, not on TC=0 quick or TC=3 abort.
 
     This guards the structural model — if the bit-field unpack breaks
