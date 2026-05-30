@@ -25,7 +25,7 @@
 --                      RNETcanframe_diary.txt). These have been
 --                      independently observed-to-work but are NOT
 --                      authoritative — open-rnet itself contains errors
---                      that rnet-firmware's primary-source RE has surfaced
+--                      that upstream-RE's primary-source RE has surfaced
 --                      (e.g. open-rnet's BTMouse MCU mis-id, 96.8%
 --                      similarity claim, BTMouse 0x0160 key
 --                      interpretation). Treat community RE as a useful
@@ -34,7 +34,7 @@
 --                      observation with no other supporting source.
 --
 --   Frame interpretations are taken (in order of decreasing authority) from:
---     1. Primary-source firmware decompiles in rnet-firmware (private repo)
+--     1. Primary-source firmware decompiles in upstream-RE (private repo)
 --     2. open-rnet community RE (rnet_utils.py, spec docs) — Documented tier
 --     3. Wire captures + parse's own cross-corpus pattern analysis
 --
@@ -43,21 +43,38 @@
 --   "[unverified]" so users can tell at a glance which interpretations
 --   are well-grounded.
 --
--- STRUCTURAL NOTE — 29-bit extended CAN IDs and Device-Type-ID:
---   Per LEDJSM MSCAN_RX_ISR @ 0x449C (HCS12 firmware plate comment): the
---   29-bit extended CAN ID encodes a target Device-Type-ID in its high
---   bits plus the protocol opcode in the rest. Known Device-Type-IDs:
---   0x6380 = LEDJSM (joystick), 0x0000 = BT-Mouse. The MSCAN hardware
---   filter (CANIDAR0-7 / CANIDMR0-7) rejects non-matching frames in
---   silicon before the CPU sees them, which is why per-module firmware
---   byte-searches return zero hits for off-target frame IDs — those
---   frames literally never reach the wrong module. The exact bit-field
---   layout that selects each Device-Type-ID is still TBD; the dispatch
---   code is in a banked HCS12 region (@ 0x3A9010 physical) that current
---   tooling can't reach properly. Implication for parse: when a
---   dealer-side source has zero hits for a frame ID, the right next
---   place to look is the corresponding target module's firmware, not
---   "we got it wrong."
+-- STRUCTURAL NOTE — why a per-module firmware search can come up empty:
+--   When a frame ID has zero literal hits in one source, that is usually
+--   scope, not a wrong decode. Two distinct cases:
+--     * Dealer-side binaries (DongleInterface.dll, DLR EXE, IRConfigurator):
+--       the Programmer is a USB/FTDI bridge that speaks only the
+--       dealer-facing subset of R-Net. Chair-internal module-to-module
+--       traffic (motor telemetry, inter-module heartbeats, per-slot state)
+--       is not in its dispatch tables at all, so zero hits there is
+--       expected by construction.
+--     * Chair-module firmware (LEDJSM, BTMouse): each module carries a
+--       software CAN-ID match table that its dispatch handlers consult
+--       (BTMouse @ FW 0x56E0-0x571B, LEDJSM @ FW 0x57C8+, cross-firmware
+--       verified byte-exact — upstream-RE BTMOUSE_POP_DISPATCH_PRIMARY_
+--       SOURCE.md §4). A frame ID absent from a module's table has no
+--       handler there. Each module also programs an MSCAN hardware
+--       acceptance filter (CANIDAR0-7 / CANIDMR0-7) at boot, which can
+--       reject off-target frames before the CPU sees them — though the
+--       exact filter constant is not resolved in the current dumps, so
+--       treat that hardware step as real-but-not-fully-characterized.
+--   So when a source has zero hits for a frame ID, the next place to look
+--   is the target module's own firmware, not "we got it wrong."
+--
+--   RETRACTED (upstream-RE 04655cbb, 2026-05-29): an earlier version of
+--   this note claimed the 29-bit ID encodes a "Device-Type-ID" in its
+--   high bits (0x6380 = LEDJSM, 0x0000 = BT-Mouse), citing a LEDJSM
+--   "MSCAN_RX_ISR @ 0x449C" plate comment plus a banked dispatch at
+--   0x3A9010. That comment was a fabricated narrative on a MISIDENTIFIED
+--   ISR — 0x449C is the CRG self-clock ISR (vector 0xFFC4); the real
+--   LEDJSM MSCAN Rx ISR is 0x429F (vector 0xFFB2) — and 0x3A9010 was an
+--   artifact of a wrong banked-address mapping (it is a halt-stub; the
+--   real page-0x3a window is simply not in the dump). The Device-Type-ID
+--   encoding is unverified and no longer claimed here.
 
 local rnet = Proto("rnet", "R-Net (Curtiss-Wright / PGDT)")
 
@@ -162,6 +179,7 @@ local pf = {
     pop_is_abort  = ProtoField.bool  ("rnet.pop.is_abort",   "Is Abort message"),
     pop_is_last   = ProtoField.bool  ("rnet.pop.is_last",    "Is Last Segment"),
     pop_label     = ProtoField.string("rnet.pop.label",      "Legacy opcode label (if any)"),
+    pop_msg_type  = ProtoField.string("rnet.pop.msg_type",   "POP_MSG_TYPE (read/write/reply/setup/abort)"),
 
     -- tones (rnet_utils.py:377)
     tones       = ProtoField.string("rnet.tones",       "Tone sequence"),
@@ -181,8 +199,8 @@ local pf = {
     err_name     = ProtoField.string("rnet.err.name",     "Error name"),
     err_state    = ProtoField.bool  ("rnet.err.fault",    "Has fault (code != 0)"),
 
-    -- JSM heartbeat: payload is constant 87×7 + 00 across all observed
-    -- frames; treat as a static "alive signature" with a validation flag.
+    -- JSM heartbeat: payload is constant 87×7 (DLC=7, no trailing byte)
+    -- across all observed frames; treat as a static "alive signature".
     jsm_signature = ProtoField.bool ("rnet.jsm_hb.valid","JSM heartbeat signature valid"),
 
     -- PM heartbeat byte 0 cycles through 0xC0/0xC1/0xC2 (one per OtherNode
@@ -202,9 +220,10 @@ local pf = {
 
     -- Auth-frame XOR validation: when xor_table for the recovered serial is
     -- known, the response 'value' XORed with the corresponding key should
-    -- yield the serial byte. We recognize three networks empirically.
+    -- yield the serial byte. We recognize four networks empirically.
     auth_valid  = ProtoField.bool  ("rnet.auth.valid",  "Auth response validates against known xor_table"),
     auth_net    = ProtoField.string("rnet.auth.network","Identified xor_table network"),
+    auth_dev_serial = ProtoField.string("rnet.auth.device_serial", "Device serial (vendor GetSN rendering of wire bytes — wire-order confirmed, not label-verified)"),
 
     -- 0x1C2C0X00 = Real-Time Clock (RTC) periodic broadcast. Field
     -- layout recovered from DongleInterface.dll DecodeRTCBroadcast +
@@ -252,7 +271,7 @@ local pe = {
     -- RAM 0x329A/B/C. Those residual bytes are part of what the
     -- unlock handler 0xF50E checks when a subsequent Pattern B
     -- (trigger) frame arrives. Per
-    -- BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md (rnet-firmware datasheet-
+    -- BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md (upstream-RE datasheet-
     -- verified update, commit f4197494). DLC and data bytes are
     -- unconstrained for Pattern A. Marked NOTE severity because if
     -- Pattern A's bit-pattern turns out to be incidental in normal
@@ -264,7 +283,7 @@ local pe = {
 
     -- BT-pairing-unlock protocol — Pattern B (the TRIGGER frame).
     -- STANDARD CAN frame, ID == 0x7A0 EXACTLY, DLC=8, all 8 data
-    -- bytes zero. Per rnet-firmware commit f4197494 (datasheet-
+    -- bytes zero. Per upstream-RE commit f4197494 (datasheet-
     -- verified via HCS12 S12CPUV2 Reference Manual): FUN_00430E's
     -- bit-shuffle for standard frames reconstructs the 11-bit CAN
     -- ID into the X register (X high = ID[10:8], X low = ID[7:0]).
@@ -291,12 +310,12 @@ local pe = {
     -- BT-pairing-unlock protocol — the actual two-frame SEQUENCE
     -- fired. Pattern A within ~1 second BEFORE Pattern B on the
     -- same bus. This is the "extremely notable" case per the
-    -- rnet-firmware doc — even if Pattern A or Pattern B alone is
+    -- upstream-RE doc — even if Pattern A or Pattern B alone is
     -- incidental, both within 1s of each other matches the chair-
     -- side unlock sequence (modulo the runtime flag, which we can't
     -- observe from the wire).
     --
-    -- *** ASSUMPTION + follow-up question for rnet-firmware: ***
+    -- *** ASSUMPTION + follow-up question for upstream-RE: ***
     -- The 1-second correlation window is a guess. The chair-side
     -- buffer at 0x329A/B/C presumably persists until the next
     -- extended frame overwrites it. If there's no extended-frame
@@ -311,8 +330,8 @@ local pe = {
     -- Dormant chair-listened CAN ID. The set {0x001, 0x00A, 0x0F0,
     -- 0x7C0, 0x7E0, 0x7E4, 0x7E8, 0x7EC} appears in BTMouse's
     -- literal CAN-ID table at FW 0x56E0-0x571B (cross-validated in
-    -- LEDJSM HCS12 firmware at FW 0x57C8+) — the chair has
-    -- acceptance-filter and/or dispatch entries ready to react to
+    -- LEDJSM HCS12 firmware at FW 0x57C8+) — the chair has CAN-ID
+    -- match-table / dispatch entries ready to react to
     -- these. But parse has ZERO corpus observations of any of them
     -- across all 30 captures (cross-checked 2026-05-24). Per
     -- BTMOUSE_SEMANTIC_LAYER.md §2.6 these are DORMANT — likely
@@ -421,6 +440,27 @@ local function tc_name(tc, is_extended)
     return "?"
 end
 
+-- POP_MSG_TYPE for standard-ID frames, derived from the (TC, Quick, CRC)
+-- byte-0 bits. Authoritative mapping from CPOPMsg::SetType @ 0x10007310
+-- (upstream-RE POP_TRANSFER_PROTOCOL.md "POP_MSG_TYPE enum"): the enum
+-- value sets exactly these byte-0 patterns —
+--   0x20 (Quick)        = type 3  (Quick single-frame write)
+--   0x10 (TC=0+CRC)     = type 7  (Download request / segmented setup)
+--   0x40 (TC=1)         = type 5  (Read / TC=1 request)
+--   0x50 (TC=1+CRC)     = type 0xE (Upload request)
+--   0x80 (TC=2)         = type 0xC/0x14 (Reply / final ACK)
+--   0xC0 (TC=3)         = type 2  (Abort / last segment)
+local function pop_msg_type_std(tc, quick, crc)
+    if tc == 0 and quick then return "Quick write (type 3)" end
+    if tc == 0 and crc   then return "Download request (type 7)" end
+    if tc == 0           then return "Setup (TC=0)" end
+    if tc == 1 and crc   then return "Upload request (type 0xE)" end
+    if tc == 1           then return "Read request (type 5)" end
+    if tc == 2           then return "Reply / ACK (type 0xC/0x14)" end
+    if tc == 3           then return "Abort / last segment (type 2)" end
+    return nil
+end
+
 -- Friendly legacy-opcode labels for the byte-0 patterns that have well-known
 -- names in the historical RE writeups. Kept as a *supplementary* annotation —
 -- the structural (TC, OtherNode) decode is the primary truth.
@@ -515,6 +555,36 @@ local function invalidate_pointer(pinfo, this_node, other_node)
     _active_pointer[_pair_key(this_node, other_node)] = nil
 end
 
+-- Device-serial reassembly from auth responses ------------------------------
+-- The auth-response value byte (CAN-ID bits 7-0) carries serial[seq] for
+-- seq 0-3 — the responding device's own 4-byte DIME serial, one byte per
+-- frame. Accumulate per slot and decode the human-readable LLYYMMNNNN form
+-- (via decode_dime) once all four bytes are seen. Works for ANY network:
+-- the raw serial byte is on the wire regardless of whether parse knows the
+-- chair's XOR table. Validated against the open-rnet corpus
+-- (08901C8A→CR15074104, 50C01C8F→CS15120080, E48C1C8C→CR15093300, …);
+-- decode_dime's letter/month validity gate cleanly rejects non-DIME slots
+-- (e.g. the 0x16970000 a PM emits for an unpopulated slot).
+--
+-- EVIDENCE: the GetSN algorithm itself is Code-tier (IRConfigurator.exe
+-- DeviceDriver.GetSN, primary .NET decompile) and the wire byte-order is
+-- empirically confirmed (reversed order fails decode_dime's gate on all 3
+-- known serials). What is NOT verified is that the rendered string equals
+-- the label physically printed on the device — "matches the published XOR
+-- serial" only proves "matches the wire bytes," since those serials are
+-- themselves wire-derived (DIME_SERIAL_DECODE.md: "need confirmation from
+-- labeled devices"). So this is the canonical rendering of the wire serial,
+-- not a label-ground-truthed identifier. Also note decode_dime returns nil
+-- for letters beyond Z (>26 gate), so "no serial shown" = "didn't decode",
+-- not "no serial present".
+local _dev_serial_bytes = {}   -- [slot] = {[0]=v,[1]=v,[2]=v,[3]=v}
+local _frame_dev_serial = {}   -- [frame_no] = decoded serial string (re-pass cache)
+
+local function _reset_dev_serial_state()
+    _dev_serial_bytes = {}
+    _frame_dev_serial = {}
+end
+
 -- Plan 1: R-Net session-state annotation ------------------------------------
 -- Mirrors the transition rules in rnet_state_timeline.py exactly, so the
 -- dissector's per-frame state matches what the standalone tool would
@@ -551,7 +621,7 @@ end
 -- can't observe). Track the most-recent Pattern A timestamp + cache
 -- which Pattern B frames fired the sequence (for re-pass display).
 --
--- *** ASSUMPTION + follow-up question for rnet-firmware: ***
+-- *** ASSUMPTION + follow-up question for upstream-RE: ***
 -- The 1.0-second correlation window is a guess. The chair-side
 -- buffer at 0x329A/B/C persists until overwritten by the next
 -- extended-frame's bit-shuffle. On a quiet bus that could be much
@@ -575,6 +645,7 @@ local function _maybe_reset_state_full(pinfo)
         _frame_binding = {}
         _reset_session_state()
         _reset_bt_unlock_state()
+        _reset_dev_serial_state()
     end
 end
 
@@ -696,7 +767,7 @@ local known_xor_tables = {
      serial = {[0]=0xB6, [1]=0x80, [2]=0x21, [3]=0xAE}},
 }
 
-local error_codes = {}        -- 818 entries; populated near end of file (see "Big lookup tables")
+local error_codes = {}        -- 827 entries; populated near end of file (see "Big lookup tables")
 local error_codes_paramtree_hint = {} -- 10 entries; populated near end of file (paramtree-coincidence hints surfaced via expert-info only — see decode_pop_xtd's status-error handler)
 
 
@@ -742,6 +813,11 @@ local rnd_address_names = {} -- 1,512 entries; populated near end of file
 -- Class enum names recovered from IRConfigurator.Device.ODI_CLASS via
 -- ilspycmd decompile of IRConfigurator.exe v6.1.2.
 local function decode_odi_class(odi)
+    -- Class names are the DLL's own typed ODI_CLASS enum (memory regions:
+    -- E2/PORT/RAM/ROM/ADC/SLOT/EVENT/SENTINEL), per IRConfigurator.exe
+    -- (ilspycmd) + POP_ODI_CLASS_ENCODING.md. NB: an earlier upstream-RE
+    -- table force-fit these to service-op names (PARAM_R/FAULT_W/RTC_R/...) —
+    -- refuted 2026-05-30; classes are NOT PARAM/FAULT. Base ODIs unchanged.
     -- Special case: class 5 SLOT
     if odi == 0x85 then return "ODI_CLASS_SLOT", 0, "size=0" end
     if odi == 0x8C then return "ODI_CLASS_SLOT", 0, "size=1-4" end
@@ -1006,7 +1082,7 @@ local function decode_serial_heartbeat(tvb, t)
     return "SerHB"
 end
 
-local function decode_auth(tvb, t, cid, is_rtr)
+local function decode_auth(tvb, t, cid, is_rtr, pinfo)
     -- 0x1F [SEQ][SLOT] [KEY][VALUE]   (parse_auth_frame_id, line 128)
     --
     -- Per-frame semantics:
@@ -1033,6 +1109,36 @@ local function decode_auth(tvb, t, cid, is_rtr)
     t:add(pf.auth_key, key)
     t:add(pf.auth_value, value)
 
+    -- Device-serial reassembly: accumulate serial[seq] per slot and decode
+    -- the DIME serial once all 4 bytes (seq 0-3) are seen. Only responses
+    -- carry the serial (RTR challenges have value=0). See _dev_serial_bytes.
+    local dev_serial = nil
+    if pinfo and not is_rtr then
+        if not pinfo.visited then
+            if seq == 0 then
+                -- An auth round starts at seq 0; reset this slot's buffer so
+                -- bytes from different devices cycling through a slot (hotplug
+                -- / re-attach to another chair) can't be spliced into a
+                -- Frankenstein serial. Only a contiguous seq 0-3 from one
+                -- round is decoded.
+                _dev_serial_bytes[slot] = { [0] = value }
+            elseif seq <= 3 then
+                local sb = _dev_serial_bytes[slot]
+                if sb then sb[seq] = value end
+            end
+            local sb = _dev_serial_bytes[slot]
+            if sb and sb[0] and sb[1] and sb[2] and sb[3] then
+                local s = decode_dime(sb[0], sb[1], sb[2], sb[3])
+                if s then _frame_dev_serial[pinfo.number] = s end
+            end
+        end
+        dev_serial = _frame_dev_serial[pinfo.number]
+        if dev_serial then
+            t:add(pf.auth_dev_serial, dev_serial):set_generated()
+        end
+    end
+    local ser_sfx = dev_serial and ("  device-serial=" .. dev_serial) or ""
+
     -- XOR validation: identify the network by key match at seq 0-3.
     -- seq 4-7 keys can coincidentally collide between networks (e.g.
     -- both Table A and D have 0x45 at seq=7) so we use only seq<=3.
@@ -1048,8 +1154,8 @@ local function decode_auth(tvb, t, cid, is_rtr)
                     -- published JSM-side serial byte — strongest
                     -- identification.
                     t:add(pf.summary, string.format(
-                        "Auth response seq=%d slot=%X serial[%d]=0x%02X ✓ %s (matches known JSM serial)",
-                        seq, slot, seq, value, net.name:match("^([^:]+)")))
+                        "Auth response seq=%d slot=%X serial[%d]=0x%02X ✓ %s (matches known JSM serial)%s",
+                        seq, slot, seq, value, net.name:match("^([^:]+)"), ser_sfx))
                     add_evidence(t, "Code", "XOR-table cross-check (full JSM serial match)")
                     return "Auth"
                 end
@@ -1073,14 +1179,14 @@ local function decode_auth(tvb, t, cid, is_rtr)
     elseif seq <= 3 then
         -- Response: value is this slot's serial byte (byte `seq`).
         t:add(pf.summary, string.format(
-            "Auth response seq=%d slot=%X serial[%d]=0x%02X%s",
-            seq, slot, seq, value, net_tag))
+            "Auth response seq=%d slot=%X serial[%d]=0x%02X%s%s",
+            seq, slot, seq, value, net_tag, ser_sfx))
     else
         -- seq 4-7 — extended round, value is module-specific (often 0).
         local ext_tag = (value == 0) and "" or string.format(" (ext=0x%02X)", value)
         t:add(pf.summary, string.format(
-            "Auth response seq=%d slot=%X extended round%s",
-            seq, slot, ext_tag))
+            "Auth response seq=%d slot=%X extended round%s%s",
+            seq, slot, ext_tag, ser_sfx))
     end
     add_evidence(t, "Documented", "rnet_utils.py:315 + parse_auth_frame_id:128 (open-rnet community RE)")
     return "Auth"
@@ -1111,6 +1217,12 @@ local function decode_pop_std(tvb, t, cid, pinfo)
         t:add(pf.pop_other, other)
         t:add(pf.pop_other_str, slot_name(other)):set_generated()
 
+        local quick    = bit.band(b0, 0x20) ~= 0
+        local crc      = bit.band(b0, 0x10) ~= 0
+        local msg_type = pop_msg_type_std(tc, quick, crc)
+        if msg_type then t:add(pf.pop_msg_type, msg_type):set_generated() end
+        local ver_str = ""  -- version-read flag, set below once ODI is known
+
         local is_abort = (tc == 3)
         t:add(pf.pop_is_abort, is_abort):set_generated()
 
@@ -1129,6 +1241,15 @@ local function decode_pop_std(tvb, t, cid, pinfo)
             local odi = tvb(1,1):uint() + tvb(2,1):uint()*256 + tvb(3,1):uint()*65536
             local sz  = tvb(4,1):uint() + tvb(5,1):uint()*256 + tvb(6,1):uint()*65536
             t:add(pf.pop_odi,  tvb(1,3), odi)
+            -- Version reads: a Read request (POP_MSG_TYPE 5 = TC=1, no Quick/CRC)
+            -- of ODI 0xC4 = SW version, 0xC3 = HW version (upstream-RE ANSWERS
+            -- Q1/Q3; CRnetInterface::ReadSWVersion @ 0x1000b950). Gating on the
+            -- read TYPE — not the ODI value alone — avoids false positives on
+            -- segmented transfers that coincidentally carry ODI 0xC4.
+            if msg_type == "Read request (type 5)" then
+                if     odi == 0xC4 then ver_str = "  [SW version read — ODI 0xC4]"
+                elseif odi == 0xC3 then ver_str = "  [HW version read — ODI 0xC3]" end
+            end
             if b0 == 0x8F then
                 -- COMPLETE: bytes 4-5 are the embedded CRC.
                 t:add_le(pf.pop_crc_value, tvb(4,2))
@@ -1352,12 +1473,12 @@ local function decode_pop_std(tvb, t, cid, pinfo)
             end
         end
         t:add(pf.summary, string.format(
-            "POP %s→%s  %s%s%s%s",
+            "POP %s→%s  %s%s%s%s%s",
             slot_name(this_node), slot_name(other),
-            op, reg_str, text_str, extra_str))
+            op, reg_str, text_str, extra_str, ver_str))
     end
     add_evidence(t, "Code",
-        "DongleInterface.dll CPOPMsg class (Ghidra); CAN-ID base (0x780/0x790) cross-validated 4-ways: DLL v5 + DLL v6 + DLR EXE + BTMouse MC9S12X MSCAN acceptance filter @ FW 0x56F4/0x56F6 (RNET_PRIMARY_SOURCE_CROSS_VALIDATION.md)")
+        "DongleInterface.dll CPOPMsg class (Ghidra); CAN-ID base (0x780/0x790) cross-validated 4-ways: DLL v5 + DLL v6 + DLR EXE + BTMouse MC9S12X software CAN-ID match table @ FW 0x56F4/0x56F6 (RNET_PRIMARY_SOURCE_CROSS_VALIDATION.md)")
     return "POPstd"
 end
 
@@ -1365,7 +1486,7 @@ end
 -- Bits 21-18 = node (4), 17-16 = TC (2), 15-0 = SegmentNumber. All 8 data
 -- bytes are segment payload — no command byte. Per same source.
 --
--- Segmented-transfer family identification (per rnet-firmware
+-- Segmented-transfer family identification (per upstream-RE
 -- RNET_TRANSFER_FAMILIES.md):
 --
 --   Family A (Programmer-driven, EVIDENCED by S11 + S10):
@@ -1418,7 +1539,7 @@ local function decode_pop_xtd(tvb, t, cid)
         slot_name(node), tc_name(tc, true), seg, family_suffix))
     if family then
         add_evidence(t, "Code",
-            "DongleInterface.dll CPOPMsg class (Ghidra) + family identification per rnet-firmware RNET_TRANSFER_FAMILIES.md (Family A EVIDENCED via S11 + S10; Family B segment-base selector UNVERIFIED)")
+            "DongleInterface.dll CPOPMsg class (Ghidra) + family identification per upstream-RE RNET_TRANSFER_FAMILIES.md (Family A EVIDENCED via S11 + S10; Family B segment-base selector UNVERIFIED)")
     else
         add_evidence(t, "Code", "DongleInterface.dll CPOPMsg class (Ghidra)")
     end
@@ -1489,7 +1610,7 @@ local function decode_mode_config(tvb, t, cid)
 
     t:add(pf.summary, string.format("ModeCfg mode=%d subaddr=0x%02X type=0x%02X (%s)%s",
         mode, subaddr, typ, mode_type_names[typ] or "?", detail))
-    add_evidence(t, "Documented", "parse decode_mode_config — per-Type empirical cross-capture validation (rnet-firmware RNET_FAMILY_DECODE_GAPS.md gap #4 confirms 'chair-side only, zero DLL hits' — no primary-source decoder exists; previous citation to 'cJSM display-protocol notes' could not be located in any doc tree)")
+    add_evidence(t, "Documented", "parse decode_mode_config — per-Type empirical cross-capture validation (upstream-RE RNET_FAMILY_DECODE_GAPS.md gap #4 confirms 'chair-side only, zero DLL hits' — no primary-source decoder exists; previous citation to 'cJSM display-protocol notes' could not be located in any doc tree)")
     return "ModeCfg"
 end
 
@@ -1656,10 +1777,10 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
     elseif cid == 0x7A0 then
         -- Normal case: Programmer presence announcement (DLC=0).
         -- Sent by the Programmer when it joins the bus. Per
-        -- rnet-firmware RNET_FRAME_GLOSSARY.md (Programmer-presence
+        -- upstream-RE RNET_FRAME_GLOSSARY.md (Programmer-presence
         -- entry).
         --
-        -- Datasheet-verified rare case (per rnet-firmware commit
+        -- Datasheet-verified rare case (per upstream-RE commit
         -- f4197494): STD 0x07A0 + DLC=8 + all-zero is the actual
         -- Pattern B trigger of the BTMouse unlock protocol. The
         -- main BT-unlock pattern detection runs after this handler
@@ -1679,13 +1800,13 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
                 t:add(pf.summary,
                     "BTMouse-internal unlock-protocol Pattern B (TRIGGER) — fires the BTMouse-side unlock if a Pattern A seed was sent recently AND runtime flag 0xFF4C4 is set. DISTINCT from the dongle's 0x08280F02 R-Net Unlock (which targets PM/SM chair-controller, not BTMouse).")
                 add_evidence(t, "Code",
-                    "BTMouse MC9S12X handler 0xF50E + datasheet-verified FUN_00430E LEAX D,X disassembly (BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md / rnet-firmware commit f4197494)")
+                    "BTMouse MC9S12X handler 0xF50E + datasheet-verified FUN_00430E LEAX D,X disassembly (BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md / upstream-RE commit f4197494)")
                 return "BTUnlockB"
             end
         end
         t:add(pf.class, "Programmer presence")
         t:add(pf.summary, "Programmer presence announcement")
-        add_evidence(t, "Documented", "rnet-firmware RNET_FRAME_GLOSSARY.md (Programmer-presence entry)")
+        add_evidence(t, "Documented", "upstream-RE RNET_FRAME_GLOSSARY.md (Programmer-presence entry)")
         return "ProgHere"
     elseif cid == 0x7B0 then
         t:add(pf.class, "Config mode 0")
@@ -1697,6 +1818,36 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         t:add(pf.summary, "Config mode 1 (STD 0x7B1, configuration-mode signaling)")
         add_evidence(t, "Documented", "rnet_utils.py:305 (open-rnet community RE)")
         return "Cfg1"
+    elseif cid == 0x080 or cid == 0x290 or cid == 0x305 or cid == 0x703 then
+        -- R-Net service status frames dispatched by CServiceManager::
+        -- ServiceCANMsg @ 0x10010140 (acts on unfiltered frames,
+        -- filter_type in {1,3}), per upstream-RE ANSWERS Q1. Concrete
+        -- per-ID byte decodes from the v6 DongleInterface.dll decompile.
+        -- None observed in parse's 30-capture corpus yet — these fire on
+        -- future Programmer/service captures.
+        local d0 = (tvb:len() >= 1) and tvb(0,1):uint() or 0
+        if cid == 0x080 then
+            t:add(pf.class, "Service: repository discovery (STD 0x080)")
+            t:add(pf.summary, string.format(
+                "Service repository discovery (STD 0x080) state=0x%02X value=0x%02X",
+                d0, (tvb:len() >= 2) and tvb(1,1):uint() or 0))
+        elseif cid == 0x290 then
+            t:add(pf.class, "Service: keyboard / KEYS (STD 0x290)")
+            t:add(pf.summary, string.format(
+                "Service KEYS (STD 0x290) -> SetKeyPress(0x%02X)", d0))
+        elseif cid == 0x305 then
+            t:add(pf.class, "Service: input states (STD 0x305 / ProcessInput)")
+            t:add(pf.summary, string.format(
+                "Service input states (STD 0x305 / ProcessInput) node=%d value=%d",
+                bit.band(d0, 0x1F), bit.rshift(d0, 6)))
+        else  -- 0x703
+            t:add(pf.class, "Service: status byte (STD 0x703)")
+            t:add(pf.summary, string.format(
+                "Service status byte (STD 0x703) = 0x%02X", d0))
+        end
+        add_evidence(t, "Code",
+            "CServiceManager::ServiceCANMsg @ 0x10010140 dispatch (DongleInterface.dll v6); per-ID byte decode from upstream-RE ANSWERS Q1 (0-corpus; fires on future service captures)")
+        return "Svc"
     elseif cid == 0x7B3 then
         t:add(pf.class, is_rtr and "Serial exchange request" or "Serial exchange")
         if is_rtr then
@@ -1714,7 +1865,7 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         -- across IDs in every capture — looks like a chair-side per-bus
         -- "I am here" tick. Direction CONFIRMED chair→bus: zero hits in
         -- dealer DLL ServiceCANMsg dispatch / pattern matchers / DLR EXE
-        -- (per rnet-firmware RNET_FAMILY_DECODE_GAPS.md Gap #8).
+        -- (per upstream-RE RNET_FAMILY_DECODE_GAPS.md Gap #8).
         local fn = cid - 0x040
         t:add(pf.class, string.format("Param-page family (fn 0x%X) [unverified semantic]", fn))
         t:add(pf.summary, string.format(
@@ -1755,7 +1906,7 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         -- Same caveat as Profile change family: IsModeChangeMsg is a
         -- public DLL export with zero in-DLL callers and zero DLR-EXE
         -- symbolic references; payload semantics are chair-side
-        -- (PM HCS12, not yet dumped).
+        -- (PM, MC56F83 — firmware unavailable).
         local fn = cid - 0x060
         local b0 = tvb:len() >= 1 and tvb(0,1):uint() or nil
         if b0 == 0x90 then
@@ -1769,16 +1920,20 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
             t:add(pf.class, string.format("Mode change family (fn 0x%X)", fn))
             t:add(pf.summary, string.format("Mode change family, function 0x%X (payload semantic chair-side, no dealer decoder)", fn))
             add_evidence(t, "Code",
-                "DongleInterface.dll IsModeChangeMsg @ 0x100015e0 (classifier only; no in-DLL callers, no DLR EXE refs); independently confirmed by BTMouse MC9S12X acceptance-filter table entry 0x0060 @ FW 0x56F2 (BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §5)")
+                "DongleInterface.dll IsModeChangeMsg @ 0x100015e0 (classifier only; no in-DLL callers, no DLR EXE refs); independently confirmed by BTMouse MC9S12X software CAN-ID match table entry 0x0060 @ FW 0x56F2 (BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §4)")
         end
         return "ModeChg"
     elseif cid >= 0x7B0 and cid <= 0x7BF then
         -- Config-mode family. 0x7B0/7B1/7B3 documented in rnet_utils.py.
         -- The whole 0x7B0-0x7BF range is now chair-side EVIDENCED: it
-        -- appears in the BTMouse MC9S12X MSCAN acceptance-filter table
-        -- at firmware addresses 0x56F2-0x5718 (18 entries, 16-bit BE
-        -- words; low 12 bits = standard CAN ID, high nibble = filter-
-        -- bank flag 0x0/0x4/0x8/0xC). The filter explicitly lists
+        -- appears in the BTMouse MC9S12X software CAN-ID match table
+        -- at firmware addresses 0x56F2-0x5718 (an interior slice of the
+        -- 0x56E0 table; 18 entries, 16-bit BE words; low 12 bits =
+        -- standard CAN ID, high nibble = flag 0x0/0x4/0x8/0xC). NB: this
+        -- is the dispatch-handlers' match table, NOT the MSCAN hardware
+        -- acceptance filter (programmed separately @ 0x6046-0x6073; per
+        -- BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §5 retraction 2026-05-29).
+        -- The table explicitly lists
         -- 0x47B0/47B1/47B2/47B3/47B6 (flag 0x4) and 0x87B0 (flag 0x8)
         -- — i.e. BTMouse RECEIVES this family from the bus. Emitter
         -- still unidentified (FTDI dongle firmware is the most likely
@@ -1790,7 +1945,7 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         t:add(pf.class, string.format("Config-mode family (fn 0x%X)", fn))
         t:add(pf.summary, string.format("Config-mode family, function 0x%X (BTMouse-listened; emitter unidentified)", fn))
         add_evidence(t, "Code",
-            "BTMouse MC9S12X MSCAN acceptance-filter table @ FW 0x56F2-0x5718 (BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §5; chair-side primary source)")
+            "BTMouse MC9S12X software CAN-ID match table @ FW 0x56F2-0x5718 (interior slice of the 0x56E0 table; BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §4; chair-side primary source)")
         return "CfgFam"
     elseif cid == 0x001 or cid == 0x00A or cid == 0x0F0
         or cid == 0x7C0 or cid == 0x7E0 or cid == 0x7E4
@@ -1817,18 +1972,22 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         -- family literal CAN-ID table at BTMouse FW 0x56E0 (entry 0,
         -- value 0x07FA) AND at LEDJSM FW 0x57C8 (same byte sequence,
         -- cross-firmware verified). Per BTMOUSE_POP_DISPATCH_
-        -- PRIMARY_SOURCE.md §4 (revised in rnet-firmware commit
+        -- PRIMARY_SOURCE.md §4 (revised in upstream-RE commit
         -- dce1b296), this table is 28 entries × 2 bytes with format
         -- {flag_nibble : 4 bits, CAN_ID : 12 bits} — every entry
         -- decodes as a valid CAN ID with zero outliers, the table
         -- contains many known-good IDs that parse already decodes
         -- (0x060 mode-change, 0x780/0x790 POP base, 0x7B0-0x7B6
         -- Config-mode, 0x7C0/0x7E0/0x7E4/0x7E8 POP family, 0x0F0
-        -- end-flags), and the table is the plausible source for the
-        -- MSCAN hardware acceptance-filter programming at FW
-        -- 0x6046-0x6073.
+        -- end-flags). NB (upstream-RE efdb4349, 2026-05-29, binary-
+        -- verified): this is a SOFTWARE-level CAN-ID match table consulted
+        -- by the dispatch handlers — NOT the source data for the MSCAN
+        -- hardware acceptance filter. The hardware filter is programmed
+        -- separately at FW 0x6046-0x6073, where 16 STAB writes load a
+        -- single constant into CANIDAR0-7/CANIDMR0-7 (16 registers cannot
+        -- hold a 28-entry table); that constant isn't resolved in the dump.
         --
-        -- NB: an earlier rnet-firmware reply (commit 1b4fe705)
+        -- NB: an earlier upstream-RE reply (commit 1b4fe705)
         -- flagged a "provisional encoding" caveat that applied to a
         -- DIFFERENT structure — the 5-byte dispatch records at
         -- 0x5587 etc. that go through FUN_00430E bit-repack at match
@@ -1842,7 +2001,7 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         t:add(pf.class, "BTMouse sentinel (0x7FA)")
         t:add(pf.summary, "BTMouse-listened sentinel (chair-firmware-family-wide; emitter unidentified, semantic TBD)")
         add_evidence(t, "Code",
-            "BTMouse MC9S12X FW 0x56E0 entry 0 + LEDJSM HCS12 FW 0x57C8 (cross-firmware-verified literal CAN-ID table; BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §4, rnet-firmware commit dce1b296)")
+            "BTMouse MC9S12X FW 0x56E0 entry 0 + LEDJSM HCS12 FW 0x57C8 (cross-firmware-verified literal CAN-ID table; BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §4, upstream-RE commit dce1b296)")
         return "BTMSent"
     else
         t:add(pf.class, string.format("Unknown STD 0x%03X", cid))
@@ -1853,14 +2012,14 @@ end
 -- Extended-frame (29-bit) decoders -------------------------------------------
 -- Rules from rnet_utils.py:decode_frame() lines 313-442.
 
-local function decode_xtd(tvb, t, cid, is_rtr)
+local function decode_xtd(tvb, t, cid, is_rtr, pinfo)
     -- Specific 0x1FB000XX device-enum check BEFORE the generic 0x1F auth
     -- rule, since 0x1FB000XX shares the 0x1F top byte but is a different
     -- frame class (8-byte DIME serial payload, not (key, value)).
     if bit.band(cid, 0xFFFFFF00) == 0x1FB00000 then
         return decode_device_enum(tvb, t, cid)
     elseif bit.rshift(cid, 24) == 0x1F then
-        return decode_auth(tvb, t, cid, is_rtr)
+        return decode_auth(tvb, t, cid, is_rtr, pinfo)
     elseif bit.band(cid, 0xFFFFF0FF) == 0x02000000 then
         return decode_joystick(tvb, t, cid)
     elseif bit.band(cid, 0xFFFFF0FF) == 0x0A040000 then
@@ -1872,14 +2031,14 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         local n = (cid == 0x0A400300) and 1 or 2
         t:add(pf.class, string.format("BTM Control %d", n))
         t:add(pf.summary, string.format("BTMouse Control %d", n))
-        add_evidence(t, "Documented", "open-rnet RNET_PROTOCOL_SPECIFICATION.md §14.2 (community spec; was mis-cited as 'DLL wire-format notes' but rnet-firmware confirms this section is open-rnet's own)")
+        add_evidence(t, "Documented", "open-rnet RNET_PROTOCOL_SPECIFICATION.md §14.2 (community spec; was mis-cited as 'DLL wire-format notes' but upstream-RE confirms this section is open-rnet's own)")
         return "BTMctl"
     elseif cid == 0x0A400002 or cid == 0x0A400102 then
         -- BTMouse Status 1/2 — same family, §14.2.
         local n = (cid == 0x0A400002) and 1 or 2
         t:add(pf.class, string.format("BTM Status %d", n))
         t:add(pf.summary, string.format("BTMouse Status %d", n))
-        add_evidence(t, "Documented", "open-rnet RNET_PROTOCOL_SPECIFICATION.md §14.2 (community spec; was mis-cited as 'DLL wire-format notes' but rnet-firmware confirms this section is open-rnet's own)")
+        add_evidence(t, "Documented", "open-rnet RNET_PROTOCOL_SPECIFICATION.md §14.2 (community spec; was mis-cited as 'DLL wire-format notes' but upstream-RE confirms this section is open-rnet's own)")
         return "BTMstat"
     elseif bit.band(cid, 0xFFFFF0F0) == 0x0C040000 then
         return decode_horn(tvb, t, cid)
@@ -1888,9 +2047,13 @@ local function decode_xtd(tvb, t, cid, is_rtr)
     elseif bit.band(cid, 0xFFFFF0FF) == 0x14300000 then
         return decode_motor_current(tvb, t, cid)
     elseif cid == 0x03C30F0F then
-        -- Payload empirically constant `87 87 87 87 87 87 87 00` across
-        -- 500/500 hackathon-dump samples + open-rnet captures. Treat as
-        -- "JSM alive signature" with a validation check.
+        -- Payload empirically constant 7×`0x87` (DLC=7, no trailing byte)
+        -- across 1,978/1,978 hackathon-dump frames + open-rnet captures.
+        -- Treat as a "JSM alive signature" with a validation check.
+        -- (upstream-RE c78f0f14 corrected an earlier "87×7 + 00" claim:
+        --  the frame is DLC=7, not DLC=8; an 8-byte JSM variant is
+        --  possible but unobserved. The len>=7 / bytes-0..6 check below
+        --  validates both cases robustly.)
         t:add(pf.class, "JSM heartbeat")
         local valid = false
         if tvb:len() >= 7 then
@@ -1958,7 +2121,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         -- DongleInterface.dll wire-format §1059; RNET_PROTOCOL_LAYER_MAP.md.
         t:add(pf.class, "Transfer Complete sentinel (R-Net CXTN_UPLOAD/DOWNLOAD → CXTN_RNET)")
         t:add(pf.summary, "ReBus transfer complete — R-Net returns to CXTN_RNET")
-        add_evidence(t, "Documented", "extract_config_data.py:68-69 (open-rnet community RE); the 'DLL wire-format §1059' part previously cited here is unverified — no doc with that section reference exists in rnet-firmware")
+        add_evidence(t, "Documented", "extract_config_data.py:68-69 (open-rnet community RE); the 'DLL wire-format §1059' part previously cited here is unverified — no doc with that section reference exists in upstream-RE")
         return "XferDone"
     elseif bit.band(bit.rshift(cid, 18), 0x7E0) == 0x780 then
         -- POP extended-ID frame. Rigorous membership test from
@@ -1967,8 +2130,8 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         return decode_pop_xtd(tvb, t, cid)
     elseif bit.band(cid, 0xFFF00000) == 0x1EC00000 then
         return decode_mode_config(tvb, t, cid)
-    elseif bit.band(cid, 0xFFFFF0FF) == 0x1C2C0000 then
-        -- 0x1C2C0X00 — Real-Time Clock (RTC) periodic broadcast.
+    elseif bit.band(cid, 0xFFFFF0FF) == 0x1C2C0000 or cid == 0x1C2C0001 then
+        -- 0x1C2C — Real-Time Clock, two directions (see low-byte note below).
         -- Per POP_FRAME_FAMILY_DECODES_2026-05-23.md: recovered from
         -- DongleInterface.dll DecodeRTCBroadcast (@ 0x1000f8e0,
         -- called by CServiceManager::ProcessRTC) and independently
@@ -1983,11 +2146,16 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         -- counter is the seconds field rolling 0..59, with byte 1
         -- (minutes) incrementing on each wrap.
         --
-        -- Slot nibble (bits 11-8) is the broadcasting module's
-        -- slot ID (the chair's RTC source; usually whoever has the
-        -- valid clock).
+        -- Direction discriminator = CAN-ID low byte (upstream-RE
+        -- e3777a4d / F5): 0x00 = chair→bus broadcast (nibble bits 11-8 =
+        -- broadcasting module's slot ID); 0x01 = Programmer→chair
+        -- clock-SET (built by RTC_EncodeSetClockFrame; slot nibble
+        -- unused). Same 7-field payload both ways.
+        local is_set = (bit.band(cid, 0xFF) == 0x01)
         local fb = bit.band(bit.rshift(cid, 8), 0xF)
-        if fb == 0x0D then
+        if is_set then
+            t:add(pf.class, "RTC set (Programmer→chair clock-set)")
+        elseif fb == 0x0D then
             -- Sub-variant per janschu99 dictionary line §1c2c0D00
             -- ("Time of Day, little-endian"). Same byte layout as
             -- the per-slot RTC broadcast; keeping it as a distinct
@@ -2016,11 +2184,12 @@ local function decode_xtd(tvb, t, cid, is_rtr)
             local dow_names = {[1]="Mon", [2]="Tue", [3]="Wed",
                                [4]="Thu", [5]="Fri", [6]="Sat", [7]="Sun"}
             t:add(pf.summary, string.format(
-                "RTC slot=%X  %s %04d-%02d-%02d %02d:%02d:%02d",
-                fb, dow_names[dow] or "?",
+                "%s  %s %04d-%02d-%02d %02d:%02d:%02d",
+                is_set and "RTC SET (PC→chair)" or string.format("RTC slot=%X", fb),
+                dow_names[dow] or "?",
                 2000 + year, month, day, hour, min, sec))
         end
-        add_evidence(t, "Code", "DongleInterface.dll DecodeRTCBroadcast @ 0x1000f8e0 + Programmer EXE FUN_004a5030 + wall-clock cross-check")
+        add_evidence(t, "Code", "DongleInterface.dll DecodeRTCBroadcast @ 0x1000f8e0 (masks the function nibble — every 0x1C2C slot is RTC) + Programmer EXE FUN_004a5030; field order (sec=data[0]/min=data[1]/hour=data[2]) binary-confirmed by the outbound encoder RTC_EncodeSetClockFrame @ 0x1000fa20 (maps COleDateTime Second/Minute/Hour; builds the 0x1C2C0001 clock-SET frame — set-vs-broadcast direction split per e3777a4d/F5); + wall-clock cross-check, corpus-validated 463/463 frames in-range across slots 0x01-0x04, 18 captures")
         return "RTC"
     elseif bit.band(cid, 0xFFFF00FF) == 0x181C0000 then
         -- 0x181C0X00 cJSM/JSM device-class family. Function byte = X.
@@ -2121,7 +2290,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
     elseif bit.band(cid, 0xFFFFF0F0) == 0x140C0000 then
         -- Payload empirically DLC=2: bytes 0-1 are a BE u16 error code.
         -- Cross-referenced against open-rnet/docs/RNET_ERROR_CODES.md
-        -- + rnet-firmware Generic V33_1_1375 .rnd extraction
+        -- + upstream-RE Generic V33_1_1375 .rnd extraction
         -- (PARSE_DECODER_VALIDATION.md). When a code resolves only via
         -- a parameter-tree-path coincidence (almost certainly NOT a
         -- real fault name), we surface the hint via expert-info
@@ -2156,7 +2325,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
                 class_item:add_proto_expert_info(pe.unresolved_fault_code)
             end
         end
-        add_evidence(t, "Documented", "open-rnet docs/RNET_ERROR_CODES.md (~302 entries from PGDT 2009 catalog) + rnet-firmware Generic V33_1_1375 .rnd extraction (PARSE_DECODER_VALIDATION.md); both community-derived — no primary-source decode of the error-code semantics yet")
+        add_evidence(t, "Documented", "open-rnet docs/RNET_ERROR_CODES.md (~302 entries from PGDT 2009 catalog) + upstream-RE Generic V33_1_1375 .rnd extraction (PARSE_DECODER_VALIDATION.md); both community-derived — no primary-source decode of the error-code semantics yet")
         return "Status"
     elseif cid == 0x0C280000 then
         -- "PM connected" sentinel — sent once by PM after the serial-number
@@ -2195,20 +2364,20 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         -- as literal bytes. Two possibilities: (a) MSCAN-packed format
         -- in BTMouse firmware (bit-unpacking would find them), or
         -- (b) another chair module we don't have a dump for. The
-        -- BTMouse acceptance filter at FW 0x56F2-0x5716 does NOT list
+        -- BTMouse CAN-ID match table at FW 0x56F2-0x5716 does NOT list
         -- the 0x0A40 family, suggesting BTMouse doesn't receive these
         -- either. Sub-byte semantics (byte 2 = family selector,
         -- byte 3 = instance/sub-index; single-byte payload looks like
         -- channel-nibble + sub-nibble) stay Inferred.
         --
-        -- (NB: an earlier rnet-firmware reply attributed these to
+        -- (NB: an earlier upstream-RE reply attributed these to
         -- "BTM HCS08" — that was based on a misidentified bootloader
         -- stub. BTMouse is actually MC9S12X-family.)
         local sub = bit.band(cid, 0xFFFF)
         t:add(pf.class, string.format("BTM family (sub 0x%04X) [unverified semantic]", sub))
-        t:add(pf.summary, string.format("BTM family sub=0x%04X (chair→bus; emitter module not yet identified)", sub))
+        t:add(pf.summary, string.format("BTM family sub=0x%04X (chair→bus; emitter = BTMouse application layer, not in our partial BTMouse dump)", sub))
         add_evidence(t, "Inferred",
-            "family-analogy to documented BTM Control/Status; chair-emitted confirmed by 5-source dealer+chair-side zero-hit sweep (incl. BTMouse MC9S12X firmware); BTMouse acceptance filter doesn't list 0x0A40 family")
+            "family-analogy to documented BTM Control/Status; chair-emitted confirmed by 5-source dealer+chair-side zero-hit sweep (incl. BTMouse MC9S12X firmware); emitter = BTMouse application layer (upstream-RE ANSWERS Q6), which is NOT in our partial BTMouse dump (BT-radio/SCI0 + POP-dispatch only) — hence the expected zero-hit")
         return "BTMx"
     elseif bit.band(cid, 0xFFFFF0FF) == 0x1C200000 then
         -- Per janschu99 categorized dictionary line 52:
@@ -2237,8 +2406,8 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         -- continuous %-measurement — 0x1B (27 dec) doesn't fit any
         -- obvious quartile, suggesting a fixed magic constant (e.g.
         -- servo-idle PWM floor) rather than a percentage. Direction
-        -- CONFIRMED chair→bus (PM HCS12): zero hits in v5/v6 DLL,
-        -- DLR EXE, LEDJSM HCS12. PM HCS12 firmware not yet dumped.
+        -- CONFIRMED chair→bus (PM, MC56F83): zero hits in v5/v6 DLL,
+        -- DLR EXE, LEDJSM HCS12. PM firmware (MC56F83) unavailable.
         local slot = bit.band(bit.rshift(cid, 8), 0xF)
         t:add(pf.class, "Per-slot motor state byte (0x14300X01) [discrete states, semantic TBD]")
         t:add(pf.slot, slot)
@@ -2253,7 +2422,7 @@ local function decode_xtd(tvb, t, cid, is_rtr)
                 "Per-slot motor state slot=%X value=0x%02X%s", slot, v, note))
         end
         add_evidence(t, "Inferred",
-            "12+ capture cross-check (discrete states); chair-emitted (PM HCS12) confirmed by 4-source dealer-side zero-hit sweep")
+            "12+ capture cross-check (discrete states); chair-emitted (PM, MC56F83) confirmed by 4-source dealer-side zero-hit sweep")
         return "MotInt"
     elseif cid == 0x15000000 then
         -- SlotChanged signal: chair→dealer notification that slot config
@@ -2269,7 +2438,20 @@ local function decode_xtd(tvb, t, cid, is_rtr)
             local key = tvb(0,4):le_uint()
             key_str = string.format("0x%08X", key)
         end
-        t:add(pf.summary, "SlotChanged filekey=" .. key_str)
+        -- The DLL's CheckForSlotChanged consumes ONLY bytes 0-3 (the
+        -- filekey); the wire frame is 8 bytes and bytes 4-7 are chair-side
+        -- metadata the dealer DLL never reads (RNET_FRAME_GLOSSARY.md
+        -- 0x15000000 + RNET_FAMILY_DECODE_GAPS.md Gap #6). Empirically those
+        -- bytes are zero in our corpus, so we stay quiet on the common case
+        -- but surface them raw if a capture ever carries non-zero metadata —
+        -- the semantic is chair-firmware-only (PM HCS12, not dumped), so we
+        -- show the bytes without naming them rather than dropping silently.
+        local trailing = ""
+        if tvb:len() >= 8 and tvb(4,4):uint() ~= 0 then
+            trailing = string.format("  trailing=%s (chair metadata, undecoded — PM firmware)",
+                bytes_to_hex(tvb, 4, 4))
+        end
+        t:add(pf.summary, "SlotChanged filekey=" .. key_str .. trailing)
         add_evidence(t, "Code",
             "DongleInterface.dll v5 CheckForSlotChanged @ 0x10008b00 + " ..
             "IsSlotChangedMsg @ 0x10001630")
@@ -2356,10 +2538,10 @@ local function decode_xtd(tvb, t, cid, is_rtr)
         --   priority=0x08, mode=0x28 (R-Net), service=0x0F (unlock),
         --   node=0x02 (Programmer source)
         --
-        -- *** TARGET CLARIFICATION (per rnet-firmware PARSE_HANDOFF_NOTES.md
+        -- *** TARGET CLARIFICATION (per upstream-RE PARSE_HANDOFF_NOTES.md
         -- action #4 + RNET_FAMILY_DECODE_GAPS.md Gap #1): ***
         -- This 0x08280F02 unlock is dongle→PM/SM-bound. BTMouse's
-        -- acceptance filter at FW 0x56F2 does NOT include 0x08280F02,
+        -- CAN-ID match table at FW 0x56F2 does NOT include 0x08280F02,
         -- so BTMouse is NOT the consumer of this unlock — it's
         -- targeted at the chair-controller (PM/SM firmware, not yet
         -- dumped). BTMouse has its own SEPARATE chair-side unlock-
@@ -2384,8 +2566,27 @@ local function decode_xtd(tvb, t, cid, is_rtr)
               "Not crypto auth; CAN-ID IS the credential.")
         add_evidence(t, "Code",
                      "DongleInterface.dll v5 CRnetInterface::SendUnlock @ 0x10010340 (v6 @ 0x1000bcf0); "..
-                     "BTMouse negative finding: ID not in BTMouse acceptance filter @ FW 0x56F2 (RNET_FAMILY_DECODE_GAPS.md Gap #1)")
+                     "BTMouse negative finding: ID not in BTMouse CAN-ID match table @ FW 0x56F2 (RNET_FAMILY_DECODE_GAPS.md Gap #1)")
         return "Unlock"
+    elseif bit.band(cid, 0xFFFFF0FF) == 0x08080000 then
+        -- Device-presence beacon (std-equiv 0x202). Decoded by
+        -- CServiceManager via DecodePresenceBeacon_08080X00 (v6
+        -- FUN_10001260 @ 0x10001260 / v5 FUN_10001370) — mask
+        -- 0xFFFFF0FF == 0x08080000, an 8-slot × 12-byte presence table;
+        -- per-device state from bit 7 of data[0]. Per upstream-RE
+        -- ANSWERS Q1 + round-2 decode (RNET_FAMILY_DECODE_GAPS Gap #1).
+        -- 0-corpus for parse; fires on future service captures.
+        local slot = bit.band(bit.rshift(cid, 8), 0xF)
+        local d0 = (tvb:len() >= 1) and tvb(0,1):uint() or 0
+        local present = bit.band(d0, 0x80) ~= 0
+        t:add(pf.class, "Device-presence beacon (0x08080X00 / std 0x202)")
+        t:add(pf.slot, slot)
+        t:add(pf.summary, string.format(
+            "Device-presence beacon slot=%X %s (data[0]=0x%02X)",
+            slot, present and "present" or "absent", d0))
+        add_evidence(t, "Code",
+            "CServiceManager DecodePresenceBeacon_08080X00 (v6 FUN_10001260 @ 0x10001260 / v5 FUN_10001370); upstream-RE RNET_FAMILY_DECODE_GAPS.md Gap #1 + round-2 decode (0-corpus)")
+        return "Presence"
     else
         t:add(pf.class, string.format("Unknown XTD 0x%08X", cid))
         return nil
@@ -2419,13 +2620,13 @@ function rnet.dissector(tvb, pinfo, tree)
 
     local tag
     if is_xtd then
-        tag = decode_xtd(tvb, t, cid, is_rtr)
+        tag = decode_xtd(tvb, t, cid, is_rtr, pinfo)
     else
         tag = decode_std(tvb, t, cid, is_rtr, pinfo)
     end
 
     -- BT-pairing-unlock protocol pattern detection. Per
-    -- BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md (rnet-firmware datasheet-
+    -- BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md (upstream-RE datasheet-
     -- verified update, commit f4197494). Runs after the regular
     -- decode so markers stack on top of whatever class label the
     -- frame already has.
@@ -3339,9 +3540,9 @@ error_codes = {
     [0xD009] = "Joystick Port 2 Mid Reference Error",
     [0xFFFF] = "Module Error: Module reporting Error may need repair",
 
-    -- ── ADDITIONS 2026-05-24 from rnet-firmware Generic V33_1_1375 ──
+    -- ── ADDITIONS 2026-05-24 from upstream-RE Generic V33_1_1375 ──
     -- Resolved against corpus-observed "(undocumented)" codes per
-    -- rnet-firmware/docs/PARSE_DECODER_VALIDATION.md. Param-tree-path
+    -- upstream-RE/docs/PARSE_DECODER_VALIDATION.md. Param-tree-path
     -- byte-pattern matches deliberately NOT added here (see
     -- error_codes_paramtree_hint below — surfaced via expert-info
     -- only because almost certainly coincidental, not real fault names).

@@ -106,9 +106,13 @@ HIGH_VALUE_FRAMES = {
     "hv_rnet_unlock": [
         {"id": 0x08280F02, "data": b"", "extended": True},
     ],
-    # 2. SlotChanged signal with a representative filekey from corpus.
+    # 2. SlotChanged signal: full 8-byte wire frame. Bytes 0-3 = LE u32
+    #    filekey (the dealer DLL consumes only these); bytes 4-7 = chair-side
+    #    metadata the DLL never reads. Trailing is illustrative non-zero so
+    #    the dissector's "surface non-zero trailing" path is exercised
+    #    (real corpus frames carry zero there).
     "hv_slotchanged": [
-        {"id": 0x15000000, "data": bytes.fromhex("01 00 01 00"),
+        {"id": 0x15000000, "data": bytes.fromhex("01 00 01 00 0a 0b 00 00"),
          "extended": True},
     ],
     # 3. Attach handshake step 1 (chair-side: Programmer announce).
@@ -210,7 +214,7 @@ EDGE_CASES = {
         {"id": 0x08280F02, "data": b"", "extended": True},
     ],
     # BT-pairing-unlock two-frame protocol. Per
-    # rnet-firmware BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md (datasheet-
+    # upstream-RE BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md (datasheet-
     # verified update, commit f4197494), the chair-side handler at
     # 0xF50E fires when Pattern A (extended frame, (id & 0x3FFFF)
     # == 0x07E57) is followed by Pattern B (STD frame, ID == 0x7A0

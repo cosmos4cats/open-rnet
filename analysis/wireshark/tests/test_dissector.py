@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Tests for parse/rnet_can.lua.
+Tests for rnet_can.lua.
 
 Strategy: run tshark with the dissector against known captures and assert on
 field values / counts. Tests are independent (no order coupling) and use only
@@ -320,13 +320,13 @@ def test_decode_poweronJSMsh_recovers_serial_via_auth():
 
 
 def test_decode_error_catalog_resolves_newly_added_codes(capture_cache):
-    """The rnet-firmware regenerated JSONL (v2, 2026-05-22) with confidence
+    """The upstream-RE regenerated JSONL (v2, 2026-05-22) with confidence
     levels + code_swapped_hex lookup should resolve codes that were
     previously "undocumented" in parse's earlier integration.
 
     Concrete check: codes 0x0F00, 0x1900, 0x1A00, 0x1E00, 0x1F00, 0x2000,
     0x2100, 0x2200, 0x2900 all appear in captures and should decode to
-    named errors per rnet-firmware's regenerated extraction.
+    named errors per upstream-RE's regenerated extraction.
     """
     new_codes = {
         0x0F00: "Joystick Error Right",   # contains
@@ -416,7 +416,7 @@ def test_decode_transfer_complete_sentinel():
 
 
 def test_decode_bit4_crc_flag_only_on_tc1_segment():
-    """Per rnet-firmware R3.5 F7: CRCFlag is only ever seen on TC=1
+    """Per upstream-RE R3.5 F7: CRCFlag is only ever seen on TC=1
     segment frames, not on TC=0 quick or TC=3 abort.
 
     This guards the structural model — if the bit-field unpack breaks
@@ -830,6 +830,41 @@ def test_auth_response_labels_distinguish_serial_bytes_from_extended_round():
     assert not bad, f"some seq 4-7 frames lack 'extended round' in summary: {bad[:3]}"
 
 
+def test_auth_device_serial_decode():
+    """The auth-response value byte carries serial[seq] for seq 0-3 — the
+    responding device's own 4-byte DIME serial. parse reassembles the four
+    bytes per slot and decodes the human-readable LLYYMMNNNN form (via the
+    same DIME algorithm used for device-enum). Validated against the known
+    Standalone-JSM serial 0x08901C8A → CR15074104."""
+    if not have_capture("poweronJSMsh"):
+        pytest.skip("poweronJSMsh capture not present")
+    rows = fields("poweronJSMsh", "rnet.auth.device_serial",
+                  ["rnet.auth.slot", "rnet.auth.device_serial"])
+    assert rows, "no decoded device serials found"
+    serials = {r[1] for r in rows}
+    assert serials == {"CR15074104"}, (
+        f"expected the JSM's serial CR15074104 (from DIME 0x08901C8A), got {serials}"
+    )
+
+
+def test_auth_device_serial_no_splice_across_hotplug():
+    """Anti-splice guard: in a hotplug/multi-device capture each slot can be
+    occupied by different devices over time. The seq==0 round-reset must keep
+    each decoded serial a coherent single-round value, not a Frankenstein
+    mix of bytes from different devices. aug19th has exactly the 4 real
+    devices; a regression (no reset) inflates this to ~17 spliced serials."""
+    if not have_capture("aug19th"):
+        pytest.skip("aug19th capture not present")
+    rows = fields("aug19th", "rnet.auth.device_serial",
+                  ["rnet.auth.device_serial"])
+    assert rows, "no decoded device serials found"
+    serials = {r[0] for r in rows}
+    assert serials == {"CR15074104", "CS15120080", "CF15080143", "BP15080268"}, (
+        f"expected exactly the 4 real devices, got {sorted(serials)} "
+        "(more than 4 → seq==0 anti-splice reset regressed)"
+    )
+
+
 def test_decode_rtc_broadcast_field_values():
     """0x1C2C0X00 is the chair's Real-Time Clock periodic broadcast
     (per DongleInterface.dll DecodeRTCBroadcast + Programmer EXE
@@ -915,7 +950,7 @@ def test_rnet_dump_wrapper_produces_expected_format():
 
 def test_session_state_machine_matches_known_transitions():
     """Plan 1: the per-frame R-Net session-state annotation must match
-    the rnet-firmware rnet_state_timeline.py tool's transition log
+    the upstream-RE rnet_state_timeline.py tool's transition log
     (different implementation, same algorithm). Anchored on
     programmer_write_file_july2017 whose timeline is fully documented:
 
@@ -1071,7 +1106,7 @@ def test_pwc_params_json_matches_lua_table():
     """
     import json as _json
     json_path = DISSECTOR_DIR / "pwc_params.json"
-    # pwc_params.json is a tracked file in the parse repo and MUST be
+    # pwc_params.json is a tracked file in this dissector tree and MUST be
     # present. If it isn't, that's a "someone deleted a committed file"
     # bug — fail hard so it's noticed, not silently skipped.
     assert json_path.exists(), (
@@ -1205,7 +1240,7 @@ def test_citations_resolve_or_explain():
     about. This test extracts every .md filename cited and checks
     each is reachable.
 
-    Public lookup locations always probed: this parse tree itself,
+    Public lookup locations always probed: this dissector tree itself,
     open-rnet/docs/, open-rnet/reference/.
 
     Private upstream-RE locations are probed only if the
@@ -1226,13 +1261,9 @@ def test_citations_resolve_or_explain():
 
     # Public lookup locations
     search_paths = [
-        DISSECTOR_DIR,                                        # parse/
-        DISSECTOR_DIR.parent.parent / "docs",                 # open-rnet/docs
-        DISSECTOR_DIR.parent.parent / "reference",            # open-rnet/reference
-        Path.home() / "src" / "open-rnet" / "docs",
-        Path.home() / "src" / "open-rnet" / "reference",
-        Path.home() / "j" / "open-rnet" / "docs",
-        Path.home() / "j" / "open-rnet" / "reference",
+        DISSECTOR_DIR,                                        # this dir
+        DISSECTOR_DIR.parent.parent / "docs",                 # repo-root/docs
+        DISSECTOR_DIR.parent.parent / "reference",            # repo-root/reference
     ]
     # Private upstream-RE location via env var (optional)
     private_docs = []

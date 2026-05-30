@@ -15,7 +15,8 @@ encrypted binary. We're dissecting a protocol whose spec we don't have.
 What we DO have:
 
 - **A lot of wire traffic** — hundreds of thousands of CAN frames
-  across 18 DEFCON-24-era captures plus a 31,043-frame hackathon dump.
+  across 29 open-rnet captures plus a 31,043-frame hackathon dump
+  (30 total).
   Whatever the spec is, the wire actually does this — observable,
   reproducible, cross-checkable.
 - **The software that generates and receives R-Net messages.** The
@@ -38,7 +39,7 @@ traffic we can reproduce, empirical cross-checks against multiple
 captures. Others are educated guesses from patterns and adjacent
 neighbors. The `rnet.confidence` field (see "Evidence policy" below)
 tells you which is which on a per-rule basis. Today the rules break
-down as **55% Code, 27% Documented, 18% Inferred** — we try to be
+down as **29% Code, 58% Documented, 13% Inferred** — we try to be
 honest about that uncertainty so you can decide what to trust.
 
 **If you can help, especially with new capture logs, please do.** See
@@ -115,7 +116,7 @@ list `rnet_can.lua`.
 
 ### For development — the Makefile
 
-If you're working from the `parse/` development tree, a Makefile
+If you're working from the dissector's development tree, a Makefile
 wraps the common workflows so you can stop reaching for the same
 three commands every commit:
 
@@ -124,7 +125,7 @@ make help      # list targets
 make install   # copy rnet_can.lua into the Wireshark plugin dir
 make test      # run the 82-test pytest suite
 make verify    # tests + full-corpus 0-Unknown regression check
-make sync      # install + mirror parse-tree files to open-rnet
+make sync      # install + mirror the dissector files to open-rnet
 ```
 
 #### How `make install` finds the plugin dir
@@ -150,8 +151,8 @@ INSTALL_DIR=~/some/other/path make install
 
 #### How `make sync` mirrors to open-rnet
 
-The convention is **parse-first**: edit `parse/`, never edit the
-mirror directly. `make sync` then copies the parse-tree files
+The convention is **source-first**: edit the development tree, never
+edit the mirror directly. `make sync` then copies the dissector files
 (`rnet_can.lua`, `pwc_params.json`, `reassemble_transfers.py`,
 `rnet-dump`, the negative-control log, all tests, and the README)
 into `$(OPEN_RNET)/analysis/wireshark/` so the public-facing copy
@@ -202,10 +203,10 @@ verify target ensures a code change can't silently regress it. If
 the open-rnet capture corpus isn't present, the corpus check is
 skipped (the pytest suite is the floor).
 
-#### No GitHub Actions for parse itself
+#### No GitHub Actions for the canonical tree
 
-`parse/` lives on a private git server (`igit`), so GitHub Actions
-doesn't run for the canonical dev tree. The `make verify` workflow
+The canonical development tree lives on a private git server, so
+GitHub Actions doesn't run for it. The `make verify` workflow
 gives equivalent regression coverage as a pre-push discipline. The
 open-rnet mirror (the public fork at `github.com/cosmos4cats/open-rnet`)
 **does** have a GitHub Actions workflow at
@@ -243,7 +244,7 @@ tshark -r captures/2026_AT_hackathon.log -Y "rnet.pop.tc == 3"
 tshark -r captures/2026_AT_hackathon.log -Y "rnet.mode.index < 6"
 tshark -r captures/2026_AT_hackathon.log -Y "rnet.err.code"          # non-zero faults
 tshark -r captures/2026_AT_hackathon.log -Y "rnet.auth.network"       # identified XOR networks
-tshark -r captures/2026_AT_hackathon.log -Y 'rnet.pop.reg_name == "TEXT"'
+tshark -r captures/2026_AT_hackathon.log -Y 'rnet.pop.register_name == "TEXT"'
 ```
 
 Same filters work in Wireshark GUI — use the display-filter bar at
@@ -301,6 +302,7 @@ without expanding each frame:
 ```
 JSM serial=50C01C8F [Table B: M300]
 Auth response seq=0 slot=0 key=0xD3 val=0x0C ✓ Table B
+Auth response seq=3 slot=1 serial[3]=0x8A ✓ Table A  device-serial=CR15074104
 Joystick X= -11 Y= -75  ↑←
 Battery  85% ████████░░
 ⚠ FAULT slot=2: Joystick Error: Joystick Error Right (0x0E00)
@@ -314,7 +316,8 @@ Lights mask=Left+Right+Hazard bitmap=Hazard  (transitioning)
 Filters work as before: `rnet.joy.x > 30` finds aggressive forward
 movement, `rnet.err.code` finds non-zero faults, `rnet.pop.crc_value`
 finds CRC echoes in COMPLETE responses, `rnet.auth.network` finds
-identified auth handshakes.
+identified auth handshakes, and `rnet.auth.device_serial` lists every
+chair/module serial decoded off the auth handshake (`CR15074104`, …).
 
 ### Capture formats
 
@@ -382,33 +385,44 @@ the one exception in the other direction (XTD despite high cadence) —
 it was probably moved out of STD because the STD namespace was
 already full of higher-priority module traffic.
 
-### The hardware-filter trick: Device-Type-ID in the high bits
+### Per-module filtering: a frame can be on the wire but invisible to a module
 
-CAN has no addressing, so R-Net builds addressing into the ID itself.
-Per the LEDJSM HCS12 firmware's `MSCAN_RX_ISR @ 0x449C` plate comment,
-the 29-bit extended ID encodes a **target Device-Type-ID** in its high
-bits plus the protocol opcode in the rest. Known Device-Type-IDs:
+CAN has no addressing, so each R-Net module decides for itself which
+frames it acts on. Two mechanisms do this, both grounded in chair-module
+firmware:
 
-| Device-Type-ID | Module |
-|---|---|
-| `0x0000` | BT-Mouse (Bluetooth phone-control receiver) |
-| `0x6380` | LEDJSM (LED joystick module) |
+- **A software CAN-ID match table.** BTMouse (MC9S12X) carries a literal
+  CAN-ID table at flash `0x56E0-0x571B`; LEDJSM (HCS12) carries the same
+  byte sequence at `0x57C8+` — cross-firmware verified byte-exact. A
+  module's dispatch handlers consult this table; an ID that isn't in it
+  has no handler on that module.
+- **An MSCAN hardware acceptance filter** (`CANIDAR0-7`/`CANIDMR0-7`),
+  programmed at boot, which can reject off-target frames before the CPU
+  sees them. The exact filter constant each module loads isn't resolved
+  in the current dumps, so treat the hardware-rejection step as real but
+  not fully characterized.
 
-Each module's MSCAN hardware filter (`CANIDAR0-7`/`CANIDMR0-7`
-registers) rejects non-matching frames **in silicon, before the CPU
-sees them**. The exact bit-field layout that selects each
-Device-Type-ID is still TBD — the dispatch lives in a banked HCS12
-region (physical `0x3A9010`) that current Ghidra HCS12 banking can't
-reach properly — but the consequence is what matters here:
+The consequence is what matters here:
 
 > **A per-module firmware byte-search for a frame ID will return zero
-> if that frame isn't addressed to that module — even if the frame is
-> on the wire and the module sees it physically.**
+> if that frame isn't handled by that module — even if the frame is on
+> the wire and the module sees it physically.**
 
 This is the most common source of "I can't find this anywhere"
 confusion when cross-validating decodes. If a frame is meant for the
 PM and you search the LEDJSM dump for its ID, you'll find nothing.
 That's correct behavior, not a missing decode.
+
+> **Retracted (per upstream-RE audit, 2026-05-29).** An earlier
+> version of this section claimed the 29-bit ID encodes a
+> "Device-Type-ID" in its high bits (`0x6380` = LEDJSM, `0x0000` =
+> BT-Mouse), sourced from a LEDJSM `MSCAN_RX_ISR @ 0x449C` plate
+> comment. That comment was a fabricated narrative on a *misidentified*
+> ISR — `0x449C` is the CRG self-clock ISR (vector `0xFFC4`); the real
+> LEDJSM MSCAN Rx ISR is `0x429F` (vector `0xFFB2`) — and the cited
+> banked dispatch at `0x3A9010` was an address-mapping artifact (a
+> halt-stub; the real page isn't in the dump). The Device-Type-ID
+> encoding is unverified and no longer claimed.
 
 ### DLC, RTR, and 125 kbit/s — the constraints that matter
 
@@ -531,7 +545,7 @@ alongside the source citation when you want to verify a claim.
     DLR EXE, IRConfigurator.exe, LEDJSM/BTMouse firmware) with the
     cited function name + address, OR
   - Empirical cross-validation against the wire data itself
-    (XOR-table match against a known network, BTMouse acceptance-filter
+    (XOR-table match against a known network, BTMouse CAN-ID match
     table at a specific firmware offset).
 
   Note: a previous version of this dissector treated `rnet_utils.py`
@@ -577,12 +591,12 @@ alongside the source citation when you want to verify a claim.
 
 #### Current distribution (as of 2026-05-24, post-audit)
 
-Across 60 evidence-tagged decode rules in the dissector:
+Across 62 evidence-tagged decode rules in the dissector:
 
 | Kind        | Count | %    |
 |-------------|------:|-----:|
-| Code        |    16 | 27%  |
-| Documented  |    36 | 60%  |
+| Code        |    18 | 29%  |
+| Documented  |    36 | 58%  |
 | Inferred    |     8 | 13%  |
 
 (Distribution shifted significantly on 2026-05-24 after a primary-source
@@ -658,11 +672,15 @@ Concretely:
   offset `0x10008300`) literally calls `CPOPMsg::CPOPMsg()` to
   construct a POP message, sets its ODI / Size / CRC fields, hands
   it to `CTransactionBase`, and sends it via `CFTDIInterface::TxCANMsg`.
-  ReBus is the caller; POP is the wire format. This relationship is
-  cross-validated against four independent code sources (v5 + v6
-  DLL symbol dumps, the Programmer EXE which instantiates both
-  classes, and the Download decompile itself) and has been stable
-  in the binary since 2013.
+  ReBus is the caller; POP is the wire format. The `Download`
+  decompile above is byte-stable across the v5 and v6 DLL builds
+  (present since 2013). The Programmer EXE independently carries its
+  own `CRebusInterface` (RTTI-confirmed) — separate evidence that
+  ReBus is a real engineering construct — though, per upstream-RE's
+  2026-05-25 audit, the EXE does **not** import DongleInterface.dll
+  (it drives `FTD2XX.dll` directly; the DLL's actual consumer is
+  IRConfigurator.exe via P/Invoke). So the EXE corroborates the class
+  *design*, not this specific DLL code path.
 - **The R-Net session state machine** (`CXTN_NONE → CXTN_CAN →
   CXTN_RNET → CXTN_UPLOAD/CXTN_DOWNLOAD`) lives on
   `CRnetInterface`, not on `CRebusInterface`. The chair-attach
@@ -767,7 +785,7 @@ primary truth.
 | Status / error    | XTD `0x140C0X0Y`  | `rnet_utils.py:437` |
 | Device state      | XTD `0x1C240X0Y`  | `rnet_utils.py:424` |
 | Device enum       | XTD `0x1FB000XX`  | `rnet_utils.py:389` |
-| Serial auth       | XTD `0x1FSSKKVV`  | `rnet_utils.py:315`, `parse_auth_frame_id:128` |
+| Serial auth (+ DIME serial reassembly) | XTD `0x1FSSKKVV`  | `rnet_utils.py:315`, `parse_auth_frame_id:128`; serial decode `IRConfigurator.exe DeviceDriver.GetSN` |
 | Network test      | STD `0x00C`       | `rnet_utils.py:273` |
 | Serial heartbeat  | STD `0x00E`       | `rnet_utils.py:275` |
 | Sleep             | STD `0x000`       | `rnet_utils.py:271` |
@@ -786,19 +804,19 @@ primary truth.
 | BTM Control 1/2                  | XTD `0x0A400300/01`             | `DongleInterface.dll wire-format notes §14.2` |
 | BTM Status 1/2                   | XTD `0x0A400002/0102`           | same |
 | Transfer Complete sentinel       | XTD `0x1E80000F` (DLC=0)        | `extract_config_data.py:68-69` + `RNET_PROTOCOL_SPECIFICATION.md §1059` |
-| SlotChanged signal (LE u32 filekey) | XTD `0x15000000`             | `DongleInterface.dll v5 CheckForSlotChanged @ 0x10008b00` + `IsSlotChangedMsg @ 0x10001630` |
+| SlotChanged signal (LE u32 filekey + raw trailing metadata) | XTD `0x15000000`             | `DongleInterface.dll v5 CheckForSlotChanged @ 0x10008b00` + `IsSlotChangedMsg @ 0x10001630` |
 | Profile change family            | STD `0x050-0x05F`               | `DongleInterface.dll IsProfileChangeMsg @ 0x10001610` (StdIDMatches(0x50)) |
 | Mode change family (data[0]≠0x90)| STD `0x060-0x06F`               | `DongleInterface.dll IsModeChangeMsg @ 0x100015e0` (StdIDMatches(0x60) + data[0] guard) |
-| Config-mode family               | STD `0x7B0-0x7BF`               | BTMouse MC9S12X acceptance-filter table @ FW `0x56F2-0x5716` (chair-side primary source) |
+| Config-mode family               | STD `0x7B0-0x7BF`               | BTMouse MC9S12X CAN-ID match table @ FW `0x56F2` (interior slice of the §4 table at `0x56E0`; chair-side primary source) |
 | CRC flag (bit 4 of POP byte 0)   | per-frame                       | `CPOPMsg::CRC_BIT` + `GetCRCFlag()` (DongleInterface.dll symbol dump) |
 | Status / error code (BE u16)     | XTD `0x140C0X0Y` payload [0..1] | `docs/RNET_ERROR_CODES.md` (302 entries) + `.rnd error-catalog extraction` v2 (810+ entries with `confidence` field) |
 | Mode request (JSM→PM)            | STD `0x060`                     | `open-rnet RNET_PROTOCOL_SPECIFICATION.md:1036` |
 | PM connected sentinel            | XTD `0x0C280000`                | janschu99 `RNETdictionary.txt §0C280000` |
 | Tones (also via function 0x01)   | XTD `0x181C0100/0D00`           | janschu99 `RNETcanframe_diary.txt:43` |
-| Time of Day (LE u48)             | XTD `0x1C2C0D00` payload        | janschu99 `RNETdictionary.txt §1c2c0D00` |
+| RTC date/time (7-field bit-packed) | XTD `0x1C2C0X00` payload      | DLL `DecodeRTCBroadcast @ 0x1000f8e0` (byte-identical layout) + janschu99 `§1c2c0D00`; 463/463 corpus frames in-range |
 | Motor power (DLC=2 fix)          | XTD `0x14300X00` LE u16         | janschu99 `RNETdictionary.txt §14300D00` |
-| Auth XOR-table validation        | XTD `0x1F.SSKKVV` responses     | 3 known networks: parse-recovered xor_tables A/B/C |
-| JSM heartbeat signature check    | XTD `0x03C30F0F` payload        | parse empirical: 500/500 = `87 87 87 87 87 87 87 00` |
+| Auth XOR-table validation        | XTD `0x1F.SSKKVV` responses     | 4 known networks: Tables A/B/C/D |
+| JSM heartbeat signature check    | XTD `0x03C30F0F` payload        | parse empirical: DLC=7, 7×`0x87`, no trailing byte (1,978/1,978 hackathon frames; upstream-RE two-corpus verified) |
 
 ### Family-analogy or pattern-inferred [unverified]
 
@@ -807,13 +825,11 @@ primary truth.
 | Sleep variants | STD `0x002`, `0x004` | `RNET_FRAME_DICTIONARY.md §1` |
 | Param-page family | STD `0x042-0x04F` | analogy to documented `0x040/0x041`; chair-emitted confirmed by 4-source DLL/EXE/HCS12 zero-hit sweep |
 | `0x06X data[0]=0x90` sibling family | STD `0x060-0x06F` payloads starting `90` | DLL `IsModeChangeMsg` excludes data[0]=0x90 as a different family; handler not yet traced |
-| Per-slot motor state byte | XTD `0x14300X01` | discrete states across 12+ captures; `0x1B` likely magic constant (not 27%); PM HCS12 not dumped |
-| 0x1C2C per-slot telemetry (functions ≠ 0x0D) | XTD `0x1C2C0X00` | parse pattern + dictionary TOD hint |
+| Per-slot motor state byte | XTD `0x14300X01` | discrete states across 12+ captures; `0x1B` likely magic constant (not 27%); PM firmware (MC56F83) unavailable |
 | cJSM/JSM family (functions ≠ 0x0D/0x01) | XTD `0x181C0X00` | parse pattern + external RE family hint |
 | Module connected per-slot | XTD `0x0C280X00` | analogy to PM-connected `0x0C280000` |
 | BTM family variants | XTD `0x0A400XXX` (non-documented) | analogy to BTM Control/Status |
 | 0x1C20 family | XTD `0x1C200X00` | adjacent to `0x1C0C/0x1C2C/0x1C30` |
-| Protocol-control sentinels (subtype 4-7) | XTD `0x1E84-0x1E87....` | parse capture audit; subtype semantics open |
 
 ## Coverage across full corpus (~455k CAN frames)
 
@@ -855,14 +871,17 @@ all in ICS captures) decodes cleanly as `TC=3 (Abort) → ISM (Slot 2)`.
 The "0xC2 mystery" was an artifact of treating two distinct bit-fields
 as a single opcode.
 
-### Third XOR network — hackathon capture (2026-05-21)
+### Fourth XOR network — hackathon capture (2026-05-21)
 
 A 31,043-frame **candump log** from a hackathon
 (`2026_AT_hackathon.log`, captured 2026-05-21) yielded a
-previously-unknown chair serial and XOR table, beyond the two networks
-in the dictionary:
+previously-unknown chair serial and XOR table, beyond the three
+networks parse already knew (Tables A/B/C):
 
-- Chair serial: `B68021AE`
+- Chair serial: `B68021AE` (vendor `GetSN` renders the wire bytes as
+  `DF18070182` — the dissector reassembles the seq 0-3 serial bytes and
+  surfaces this via `rnet.auth.device_serial`; wire-order confirmed, not
+  yet checked against a physical device label)
 - xor_table:    `[0xDA, 0x30, 0xE1, 0x55, 0x36, 0x20, 0x79, 0x45]`
 
 The dissector decoded 98.95% of this capture on first contact, without
@@ -870,14 +889,16 @@ adaptation — Wireshark reads candump logs natively, and the dissector
 hooks the SocketCAN encapsulation that Wireshark uses for both pcap
 and candump sources.
 
-Two new frame families were also added as `[unverified]` decoders
-based on the structural patterns visible in this capture:
+Two new frame families surfaced in this capture:
 
-- **XTD `0x1C2C0X00`** (198 frames): 6-byte payload comprising a
-  per-burst sample counter (byte 0), a slow LE u16 counter
-  (bytes 1-2, advanced from 3129 to 3329 over 197 seconds), and a
-  3-byte constant tail. Arrives in 10-frame bursts every ~20s.
-  Looks like periodic telemetry from a slot-1 device.
+- **XTD `0x1C2C0X00`** (198 frames): first read as a telemetry burst —
+  a "per-burst sample counter" (byte 0) plus a "slow LE u16 counter"
+  (bytes 1-2, 3129→3329 over 197 s). That was a misread: the frames are
+  the chair's **real-time clock**, decoding to a clean 1 Hz progression
+  `2026-05-21 12:57:45 → 13:01:02`. The apparent "counter" is just
+  `minutes + hour×256` read as a u16 (`12:57` → `57+12·256 = 3129`;
+  `13:01` → `1+13·256 = 3329`). The bits-11:8 nibble is the broadcasting
+  slot, not a function selector. See the RTC decode under "What is decoded."
 - **XTD `0x181C0F00`** (102 frames): function `0x0F` in the
   `0x181C` cJSM/JSM device-class family (where `0x0D` is the known
   audio-tones function). Fully constant 8-byte payload
@@ -922,7 +943,7 @@ against an adversary with bus access.
 
 | Frame family            | Meaning                                          | What "successful" / "failed" looks like |
 |---|---|---|
-| `Serial auth — response` (CAN ID `0x1F<seq><slot><key><val>`) | Per-device serial-byte broadcast in response to a JSM challenge. Each device emits its 4-byte DIME serial across `seq=0..3` as `val = key XOR serial[seq]`, where `key` comes from a network-wide XOR table. | **Validated**: `✓ Table B` next to the label = `key[seq]` matches a known XOR table at that position. **Not validated**: no `✓` tag = the network's XOR table isn't one of our four known (A/B/C/D). The "validation" is just a network-identity match, not crypto — both sides know the table and the serial. |
+| `Serial auth — response` (CAN ID `0x1F<seq><slot><key><val>`) | Per-device serial-byte broadcast in response to a JSM challenge. Each device emits its 4-byte DIME serial directly in the `val` field across `seq=0..3` (`val = serial[seq]`); the `key` field carries the network-wide XOR-table constant (`key = xor_table[seq]`), identical across every device on the network. | **Validated**: `✓ Table B` next to the label = `key[seq]` matches a known XOR table at that position. **Not validated**: no `✓` tag = the network's XOR table isn't one of our four known (A/B/C/D). The "validation" is just a network-identity match, not crypto — both sides know the table and the serial. |
 | `Serial auth — RTR challenge` (same CAN ID with RTR bit set) | The JSM asking each device "tell me byte N of your serial." | **In progress**: each challenge precedes the matching response by milliseconds. |
 | `R-Net Unlock — service-mode enable` (`0x08280F02`, DLC=0) | The Programmer flipping the chair into service mode. **The actual gate** for parameter writes / fault clearing chair-side. | **Successful** by emission: if the frame is on the wire, the chair's `CServiceManager` `+0x7b` "active" flag is presumed set. **No failure mode visible on wire** — the chair either accepts (silent) or ignores (also silent). |
 | `Transfer Complete sentinel` (`0x1E80000F`) and ReBus attach handshake (`0x1E84..87`) | R-Net session-layer state transitions (see "Protocol layering" above). | Distinct from "auth" — these are session-state transitions, not access-control events. |
@@ -960,22 +981,41 @@ Filter `rnet.auth.network` to see only the successfully-validated
 responses; filter `rnet.class contains "challenge"` to see the
 in-progress challenge phase.
 
-### What's NOT decoded (yet)
+### Service operations — now mapped (upstream-RE ANSWERS Q1)
 
-Per the new evidence, R-Net's access-control protocol also includes:
+The earlier "service opcodes 0x00–0x07 ride inside service frames"
+framing was imprecise. Per the `CServiceManager::ServiceCANMsg @
+0x10010140` decompile:
 
-- **Service opcodes 0x00-0x07** (PARAM_R/W, XY_CNT_R/W, KEYS_R,
-  FAULT_R/W, RTC_R) ride **inside** R-Net service frames; specific
-  wire layouts aren't yet pinned down for individual decoders.
-- **Service opcodes 0x80, 0x81** (repository discovery, file-slot
-  request) — same, layout TBD.
-- **Repository ownership token** (1 byte: TAKEN_BIT 0x10 | NODE_MASK
-  0x0F) — chair-internal state, surfaces on wire only as
-  side-effects of ownership negotiation.
+- **PARAM_R/W and FAULT_R/W are POP request/reply operations, not
+  standalone service frames.** They ride on the standard POP frame
+  (`0x780 | (dir<<4) | node`) as a read (TYPE=5) or write (TYPE=3) of a
+  specific ODI. The ODI **class** is a memory region — `E2` (EEPROM) /
+  `PORT` / `RAM` / `ROM` / `ADC` / `SLOT` / `EVENT` — **not** a
+  PARAM/FAULT class (an earlier answer's "parameter-class/fault-class"
+  framing was a service-op force-fit, refuted 2026-05-30 against the
+  DLL's typed enum; the PARAM/FAULT service ops are real but their
+  mapping to ODI classes is unverified). The dissector already decodes
+  the POP ODI + class correctly, so these surface as POP frames with
+  their ODI. Version
+  reads are a concrete example, **now auto-flagged**: a `Read request`
+  (`POP_MSG_TYPE` 5) of ODI `0xC4` = SW version, `0xC3` = HW version. The
+  dissector derives `POP_MSG_TYPE` from the (TC, Quick, CRC) bits, so it
+  distinguishes a true version *read* from a segmented transfer that
+  merely carries ODI `0xC4` — 8 real SW-version reads in the corpus, zero
+  false positives.
+- **Service *status* frames** — `0x080` (repository discovery),
+  `0x290` (KEYS → `SetKeyPress`), `0x305` (per-node status), `0x703`
+  (status byte) — now have decoders (Code-tier from the DLL dispatch).
+  None appear in parse's corpus yet; they fire on future
+  Programmer/service captures.
 
-These are documented upstream in `RNET_AUTH_PROTOCOL.md` but the
-specific CAN-frame layouts needed for per-frame decoding aren't yet
-mapped. Future work.
+Still open: the **repository ownership token** (1 byte:
+`TAKEN_BIT 0x10 | NODE_MASK 0x0F`) is chair-internal state that
+surfaces on the wire only as a side-effect of ownership negotiation;
+and the per-sub-ID payload semantics of the `0x05X`/`0x06X` families
+(family confirmed via the DLL predicates — the low-nibble meaning is
+decided chair-side / in the DLR-EXE send path; see Known gaps).
 
 ## Reading the output — things that look weird but aren't bugs
 
@@ -1003,7 +1043,7 @@ our extracted `.rnd` database. We show both:
 - **`(Generic-fw guess: ICS_ABS_MIN_ELEVATOR_TRAVEL)`** — the
   **specific parameter name** from our extracted Generic V33_1_1375
   catalog. **This name is firmware-version-specific** — per the
-  rnet-firmware address-stability study (2026-05-23), of 159 wire
+  upstream-RE address-stability study (2026-05-23), of 159 wire
   addresses common across 6 firmware extractions, zero map to the
   same name across them. The name is a hint, not ground truth.
 
@@ -1024,12 +1064,13 @@ a candidate, verify before relying."
 
 ### `✓ Table B` next to auth-response frames
 
-Means the dissector cryptographically validated the auth-response
-bytes against XOR Table B's key sequence. Auth handshake = the chair
-proving it knows its serial number XOR'd with a per-network key
-table. A `✓` means the math worked out — strong identification of
-which R-Net network the chair belongs to. Tables A through D are
-documented in `rnet_can.lua`; B is by far the most common (M300
+Means the dissector matched the auth-response frame's `key` byte
+against XOR Table B's key sequence at that seq position — confirming
+which R-Net network the chair belongs to. It's a direct byte match,
+not a cryptographic check: the `key` field carries the network's
+XOR-table constant in clear, and `val` carries the device's serial
+byte. A `✓` is a strong network-identity signal. Tables A through D
+are documented in `rnet_can.lua`; B is by far the most common (M300
 networks).
 
 ### `[unverified]` vs `[CONJECTURAL]`
@@ -1049,12 +1090,12 @@ Both flag uncertainty, in different ways:
 Both turn into `Inferred` in the `rnet.confidence` field (when
 that pref is enabled).
 
-### `99.64% evidenced coverage` is per-frame-class, not per-frame
+### `99.78% evidenced coverage` is per-frame-class, not per-frame
 
 The headline coverage number counts frames, not decode rules. Some
 decode rules cover many thousands of frames (joystick, heartbeats),
 others cover a handful (rare faults). The README's separate
-**55% Code / 27% Documented / 18% Inferred** distribution counts
+**29% Code / 58% Documented / 13% Inferred** distribution counts
 **rules**, not frames. A capture can be 99% evidenced even though
 most of its rules are Documented or Inferred, because the few Code-
 tier rules cover the bulk of the wire traffic.
@@ -1437,7 +1478,7 @@ column fields (paste the name into the Columns preferences dialog).
 
 | Field | Type | What it is |
 |---|---|---|
-| `rnet.pop.tc` | uint8 | Transfer code: 0/1 = segment, 2 = complete-side, 3 = abort |
+| `rnet.pop.tc` | uint8 | Transfer code: 0/1/2 = segment indicator N; 3 = abort (standard-ID) / last segment (extended-ID) |
 | `rnet.pop.tc_str` | string | TC name ("Segment indicator 0" / "Abort" / ...) |
 | `rnet.pop.quick` | bool | Quick (single-frame) flag |
 | `rnet.pop.crc` | bool | CRC flag (bit 4 of data[0]) |
@@ -1456,8 +1497,14 @@ column fields (paste the name into the Columns preferences dialog).
 | `rnet.pop.crc_value` | uint16 | CRC echo embedded in COMPLETE responses |
 | `rnet.pop.segment` | uint16 | Segment number in POP-ext segmented transfers |
 | `rnet.pop.size` | uint32 | Size field on segmented-transfer setup frames |
-| `rnet.pop.is_abort` | bool | True when TC=3 (abort frame) |
+| `rnet.pop.is_abort` | bool | True when TC=3 (abort frame, standard-ID) |
+| `rnet.pop.is_last` | bool | True when TC=3 on an **extended-ID** POP frame (last segment — the extended-ID counterpart of `is_abort`) |
 | `rnet.pop.label` | string | Legacy opcode name (OPEN/REQUEST/ACK/COMPLETE/...) when recognized |
+| `rnet.pop.msg_type` | string | `POP_MSG_TYPE` derived from (TC, Quick, CRC): Quick write (3) / Read request (5) / Download req (7) / Upload req (0xE) / Reply-ACK (0xC/0x14) / Abort (2) — per `CPOPMsg::SetType` |
+| `rnet.pop.dir` | uint8 | Direction discriminator (CAN ID bit 4) |
+| `rnet.pop.block` | uint8 | Segment-block counter (data[7] on standard-ID setup frames) |
+| `rnet.pop.pointer` | uint16 | Raw POINTER register value (bytes 4-5 LE u16) |
+| `rnet.pop.pointer_idx` / `.pointer_sub` | uint8 | POINTER index (data[4]) / sub-index (data[6]); combined into `pointer_param_id` |
 
 #### Auth handshake (`rnet.auth.*`)
 
@@ -1469,6 +1516,7 @@ column fields (paste the name into the Columns preferences dialog).
 | `rnet.auth.value` | uint8 | Responding module's serial byte at seq (or 0 on RTR challenge) |
 | `rnet.auth.valid` | bool | Key matched a known XOR network table |
 | `rnet.auth.network` | string | Identified network name ("Table A: ..." etc.) when valid |
+| `rnet.auth.device_serial` | string | Device serial (`LLYYMMNNNN`), reassembled from the seq 0-3 serial bytes and rendered through the vendor's own `GetSN`/DIME algorithm (Code-tier; IRConfigurator `DeviceDriver.GetSN`). Works for **any** network — the raw serial byte is on the wire whether or not parse knows the chair's XOR table. Resolves once all four bytes of a single auth round are seen; the seq-0 round boundary prevents byte-splicing across devices on hotplug/re-attach. **Caveat:** wire byte-order is empirically confirmed, but the rendered string is *not yet ground-truthed against a physically-labeled device* — it's the canonical rendering of the wire bytes, not a label-verified identifier (`DIME_SERIAL_DECODE.md`: "need confirmation from labeled devices") |
 
 #### Joystick / motor / drive
 
@@ -1487,7 +1535,16 @@ column fields (paste the name into the Columns preferences dialog).
 |---|---|---|
 | `rnet.batt.percent` | uint8 | Battery level % |
 | `rnet.lights.bitmap` | uint8 | Indicator bitmap byte (raw) |
-| `rnet.lights.left` / `.right` / `.hazard` / `.flood` | bool | Individual indicator-bit booleans |
+| `rnet.lights.left` / `.right` / `.hazard` / `.flood` | bool | Individual indicator-bit booleans (bits `0x01` / `0x04` / `0x10` / `0x80`) |
+| `rnet.lights.bit6` | bool | Bitmap bit `0x40` — `[Inferred]` co-occurs with the full "all lamps active" state (5-capture sweep); specific indicator name unconfirmed (upstream-RE `RNET_FRAME_GLOSSARY.md` `0x0C000400`, needs ILM dump) |
+| `rnet.lights.bit1` / `.bit3` / `.bit5` | bool | Bitmap bits `0x02` / `0x08` / `0x20` — defined and filterable but semantics still **open** (no source yet) |
+
+#### Audio and misc
+
+| Field | Type | What it is |
+|---|---|---|
+| `rnet.tones` | string | Decoded tone/buzzer sequence as (length, note) pairs (XTD `0x181C0D00`) |
+| `rnet.note` | string | Free-form analyst note attached to certain frames (provenance caveats, magic-pattern flags) — not present on every frame |
 
 #### RTC broadcast (`rnet.rtc.*`)
 
@@ -1547,31 +1604,34 @@ for future RE work:
 
 (`XTD 0x1C2C0X00` was promoted to **Documented** in 2026-05-23 after
 empirical cross-checks. `XTD 0x14300X01` was previously promoted but
-re-tiered to **Inferred** after rnet-firmware's multi-source negative
+re-tiered to **Inferred** after upstream-RE's multi-source negative
 finding suggested the `0x1B` value is a magic constant rather than a
-27% measurement. PM HCS12 firmware analysis would resolve.)
+27% measurement. PM-side firmware (MC56F83) would settle it but isn't
+obtainable; the realistic path is a live capture correlating
+speed/profile changes with the byte.)
 
 ### Why dealer-side zero-hit ≠ "we got it wrong"
 
 A recurring pattern in cross-validation: parse identifies a frame
-family by analogy or capture-pattern, then rnet-firmware searches the
+family by analogy or capture-pattern, then upstream-RE searches the
 dealer-side sources (DLL v5/v6, DLR EXE, IRConfigurator) and finds
 **zero literal hits**. That used to feel like a negative result, but
-per LEDJSM `MSCAN_RX_ISR @ 0x449C` (HCS12 plate comment), it's
-expected: the 29-bit extended CAN ID encodes a **target Device-Type-ID**
-in its high bits (known: `0x6380` = LEDJSM, `0x0000` = BT-Mouse), and
-each module's MSCAN hardware filter rejects non-matching frames in
-silicon before the CPU sees them. So if a frame is targeted at the
-PM, it literally never reaches LEDJSM — searching LEDJSM's firmware
-for it will always return zero.
+it's usually scope, not a wrong decode. The dealer Programmer is a
+USB/FTDI bridge that speaks only the **dealer-facing subset** of
+R-Net — chair-internal module-to-module traffic (motor telemetry,
+inter-module heartbeats, per-slot state) is never in its dispatch
+tables, so a chair-internal frame ID produces zero hits in the
+Programmer binaries by construction.
 
 This means the right next step when dealer-side comes up empty is to
 **look at the target module's firmware**, not assume the decode is
 wrong. The catch: most chair modules' firmware isn't in our dump set
-(PM HCS12, cJSM audio MCU, BT-Mouse application). The exact
-bit-field layout of Device-Type-ID is also still TBD — the dispatch
-code lives in a banked HCS12 region (logical `0x4E9010`, physical
-`0x3A9010`) that current Ghidra HCS12 banking can't reach properly.
+(PM MC56F83, cJSM audio MCU, BT-Mouse application). And even within the
+two chair modules we do have (LEDJSM, BTMouse), a frame addressed to a
+*different* module won't appear in this one's CAN-ID match table — see
+the *Per-module filtering* note in the CAN primer above. So "zero hits"
+propagates as scope at two layers — dealer-software, then per-module —
+before it ever means "wrong."
 
 Several of the remaining gaps (especially the STD neighborhoods) are
 likely per-profile or per-target-device variants of their documented
@@ -1601,29 +1661,43 @@ firmware-version-aware lookup would remove the caveat.
 Three things, none of which are solved today:
 
 1. **A reliable signal in wire traffic that identifies firmware
-   version.** Candidate signals:
-   - The `0x1E86`/`0x1E87` chair-fingerprint bytes (chair 50C01C8F
-     consistently produces `0x8314`/`0x0166`; chair B68021AE
-     produces `0x3D16`/`0x0006`). These look like persistent
-     per-chair hashes — possibly include firmware version, possibly
-     pure pairing IDs.
-   - The DIME serial — encodes a YYMM-style manufacturing-batch
-     prefix, which correlates loosely with firmware era but isn't
-     a direct version field.
-   - Startup enumeration frames (`0x1FB0` device-enum), if they
-     contain a firmware-version sub-field.
-   - Mode-config startup payloads.
-2. **A captured mapping** of `firmware-version → fingerprint
-   bytes`. Today we have two chairs in the corpus with known
-   fingerprints but unknown firmware versions. To build the map
-   we'd need captures explicitly labeled with their chair's
-   firmware build (via a Programmer connection that read the
-   firmware ID, or vendor documentation).
+   version.** Largely resolved (upstream-RE ANSWERS Q3): the chair
+   answers a deterministic on-wire version query —
+   **`ReadSWVersion` = a POP read of ODI `0xC4`** returning a u16
+   software version, with **`ReadHWVersion` = ODI `0xC3`** for hardware
+   (`CRnetInterface::ReadSWVersion @ 0x1000b950` / `ReadHWVersion @
+   0x1000b8c0`). The dissector **auto-flags** these: it derives
+   `POP_MSG_TYPE` from the (TC, Quick, CRC) bits and labels a `Read
+   request` (type 5) of ODI `0xC4`/`0xC3` as a SW/HW version read — 8 real
+   SW-version reads in the corpus, zero false positives (the other ODI-
+   `0xC4` frames are segmented transfers, correctly *not* flagged). One
+   caveat remains: it's a **solicited**
+   read (only present when a Programmer session is in the capture, not an
+   unsolicited broadcast). Signals that did **not** pan out:
+   - The `0x1E86`/`0x1E87` chair-fingerprint bytes (chair 50C01C8F →
+     `0x8314`/`0x0166`; B68021AE → `0x3D16`/`0x0006`) are **unverified
+     as a version signal** — they have zero references in the dealer
+     DLL, so they read as persistent per-chair identity tags. (Absence
+     in the DLL isn't proof a chair-side generator doesn't encode
+     version, but the ODI read is the reliable route.)
+   - The DIME serial encodes a YYMM manufacturing-batch prefix —
+     correlates loosely with firmware era, not a direct version field.
+2. **A mapping** from the version-read u16 (ODI `0xC4`) to a catalog
+   key. The wire now hands us the version directly when a Programmer is
+   present; what's still needed is the `version → .rnd catalog` table
+   (which build maps to which extraction).
 3. **The bundled JSONLs**: ~10MB of parameter catalogs (the 6
    existing extractions plus any new firmware versions). Today the
-   dissector is a single ~250KB Lua file. Adding the JSONLs is
+   dissector is a single ~325KB Lua file. Adding the JSONLs is
    straightforward but bumps the install size 40×, and adds a
    load-time JSON parser the dissector currently doesn't need.
+
+   (As of 2026-05-24, upstream-RE's parameter **registry v2** exposes
+   verified per-parameter `factory_default` / `absolute_min` /
+   `absolute_max` / `step` as named fields — 5,329 records — instead of a
+   raw uint32 tail. If this feature lands, v2 is the catalog source to
+   pull from; the named fields simplify the loader and let the dissector
+   surface parameter bounds, not just names.)
 
 ### Why we aren't doing this now
 
@@ -1633,7 +1707,7 @@ Three things, none of which are solved today:
   prefix proxy already gives readers the stable module
   identification piece, so the marginal value of disambiguating
   the specific name is small for typical use.
-- **Install-size jump is real.** Going from one 250KB Lua file to a
+- **Install-size jump is real.** Going from one 325KB Lua file to a
   Lua file + 10MB of JSONLs changes the deployment story (drop-in
   file → manage a directory of bundled data). Worth doing if the
   feature lands; not worth doing speculatively.
@@ -1673,8 +1747,8 @@ analysis/wireshark/
   README.md                — this file
   reassemble_transfers.py  — POP transfer reassembly companion
   pwc_params.json          — vendored Permobil PWC param_id → name snapshot
-  tests/test_dissector.py  — pytest suite (42 tests)
-  tests/test_edge_cases.py — synthetic edge-case test harness (11 tests)
+  tests/test_dissector.py  — pytest suite (46 tests)
+  tests/test_edge_cases.py — synthetic edge-case test harness (36 tests)
   tests/synthetic/         — pcap generator for edge-case fixtures
 
 ../../captures/
@@ -1708,10 +1782,10 @@ panel (severity: Warning) so you can't miss them. The current
 
 | What | Pattern | Why it's interesting |
 |---|---|---|
-| **BT-pairing-unlock Pattern A (seed frame)** | Extended CAN frame, `(id & 0x3FFFF) == 0x07E57` (DLC and data unconstrained; bits 17:16 must be 0, top 11 bits free) | First frame of a TWO-frame unlock sequence per BTMouse handler `0xF50E`. The chair-side bit-shuffle leaves the magic bytes `0x57 0x7E 0x00` in the firmware's internal buffer at RAM `0x329A/B/C`. NOTE-severity marker on its own (the pattern could be incidental in some traffic) — pair with Pattern B below to see the full sequence. Datasheet-verified per `BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md` (rnet-firmware T59). |
+| **BT-pairing-unlock Pattern A (seed frame)** | Extended CAN frame, `(id & 0x3FFFF) == 0x07E57` (DLC and data unconstrained; bits 17:16 must be 0, top 11 bits free) | First frame of a TWO-frame unlock sequence per BTMouse handler `0xF50E`. The chair-side bit-shuffle leaves the magic bytes `0x57 0x7E 0x00` in the firmware's internal buffer at RAM `0x329A/B/C`. NOTE-severity marker on its own (the pattern could be incidental in some traffic) — pair with Pattern B below to see the full sequence. Datasheet-verified per `BTMOUSE_UNLOCK_FRAMES_FOR_PARSE.md` (upstream-RE T59). |
 | **BT-pairing-unlock Pattern B (trigger frame)** | Standard CAN frame, ID == `0x07A0` EXACTLY, DLC=8, ALL 8 data bytes zero | Second frame of the sequence — fires the unlock IF Pattern A primed the buffer recently AND the runtime flag at `0xFF4C4` is set (banked code decides this). NOTE-severity marker per-frame. The frame's class label is also re-flagged from the default "Programmer presence" to make the magic-pattern match visible without expert-info enabled. (Earlier interpretations listed 8 candidate IDs with low byte 0xA7; the datasheet-verified disassembly of FUN_00430E narrows the trigger to exactly 0x07A0.) |
 | **BT-pairing-unlock full sequence (Pattern A → Pattern B)** | Pattern B arrives within ~1s of a Pattern A on the same bus | The actually-interesting case. WARN-severity marker fires on the Pattern B frame. The handler then calls a banked function whose effect we can't statically see — likely BT pairing enable, factory test mode, or service-only parameter writes. |
-| **Dormant chair-listened STD CAN IDs** | STD `0x001`, `0x00A`, `0x0F0`, `0x7C0`, `0x7E0`, `0x7E4`, `0x7E8`, `0x7EC` | All appear in BTMouse's literal CAN-ID table at flash `0x56E0-0x571B` (cross-validated against LEDJSM HCS12 at flash `0x57C8+`) — the chair has acceptance-filter and/or dispatch entries ready to react. But none of these IDs has ever appeared in any of the 30 captures in parse's corpus. Likely candidates: factory/diagnostic frames, service-tool triggers, or planned-but-not-shipped variants. |
+| **Dormant chair-listened STD CAN IDs** | STD `0x001`, `0x00A`, `0x0F0`, `0x7C0`, `0x7E0`, `0x7E4`, `0x7E8`, `0x7EC` | All appear in BTMouse's literal CAN-ID table at flash `0x56E0-0x571B` (cross-validated against LEDJSM HCS12 at flash `0x57C8+`) — the chair has CAN-ID match-table / dispatch entries ready to react. But none of these IDs has ever appeared in any of the 30 captures in parse's corpus. Likely candidates: factory/diagnostic frames, service-tool triggers, or planned-but-not-shipped variants. |
 | **0x1E8X session sentinel with subtype 1, 2, or 3** | XTD `0x1E810000`-`0x1E830000` (the rare subtypes) | Multi-source negative confirmation across 4 dealer-side binaries and the 30-capture corpus says these subtypes are deliberately unused (parse handles N=0 Transfer Complete and N=4-7 attach handshake — the rest were never seen). If a wire frame uses one, that means a chair module we don't have a primary source for. |
 | **Fault code with no catalog entry** | Status/error frame (XTD `0x140C0X0Y`) carrying a code parse doesn't recognize | Parse has ~830 known fault codes from `open-rnet/docs/RNET_ERROR_CODES.md` + Generic V33_1_1375 .rnd extraction. A code outside both catalogs likely means an OEM-specific .rnd (Amylior / Permobil / Pride / SwitchIt) or a chair firmware generation we don't have. NOTE-severity marker. When a paramtree-coincidence hint is available, the summary includes it with explicit "almost certainly NOT the fault name" framing — a hint for analysts, not a claim. |
 
@@ -1721,6 +1795,24 @@ If you capture any of these:
 3. File an issue or share the capture with us — see "Contributing" below
 
 The dissector will tell you which kind it saw. In Wireshark, look for the **Warning-level Expert Info** items in the bottom-right status bar, or use the `Analyze → Expert Information` menu. In tshark, the markers appear in `-V` output alongside the frame.
+
+Each marker is also a filterable expert-info field, so you can sweep a
+capture for any of them without reading every frame:
+
+| Marker | Filter field |
+|---|---|
+| BT-pairing-unlock Pattern A (seed) | `rnet.expert.bt_unlock_pattern_a` |
+| BT-pairing-unlock Pattern B (trigger) | `rnet.expert.bt_unlock_pattern_b` |
+| BT-pairing-unlock full sequence (A→B) | `rnet.expert.bt_unlock_sequence` |
+| Dormant chair-listened STD CAN ID | `rnet.expert.dormant_chair_listened` |
+| 0x1E8X session sentinel, unused subtype | `rnet.expert.sentinel_unknown_subtype` |
+| Fault code with no catalog entry | `rnet.expert.unresolved_fault_code` |
+| Fault-code paramtree coincidence hint | `rnet.expert.fault_code_paramtree_hint` |
+
+```sh
+# e.g. find the full BT-unlock sequence anywhere in a capture:
+tshark -r capture.pcapng -Y 'rnet.expert.bt_unlock_sequence'
+```
 
 ## Contributing
 

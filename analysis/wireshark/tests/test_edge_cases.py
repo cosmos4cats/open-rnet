@@ -157,7 +157,7 @@ def test_bt_unlock_pattern_a_marker(edge_pcap_dir):
 
 def test_bt_unlock_pattern_b_marker(edge_pcap_dir):
     """Pattern B of the BTMouse two-frame unlock protocol — per the
-    datasheet-verified rnet-firmware update (commit f4197494):
+    datasheet-verified upstream-RE update (commit f4197494):
     STANDARD CAN frame, ID == 0x07A0 EXACTLY, DLC=8, ALL 8 data
     bytes zero. Fires a NOTE-severity marker. The frame's class
     label is also re-flagged from the default "Programmer presence"
@@ -207,7 +207,7 @@ def test_bt_unlock_pattern_b_marker(edge_pcap_dir):
 def test_bt_unlock_pattern_a_tightened_mask(edge_pcap_dir):
     """Pattern A's mask was tightened from (id & 0xFFFF) == 0x7E57
     to (id & 0x3FFFF) == 0x07E57 in the datasheet-verified update
-    (rnet-firmware commit f4197494). The added bits 17:16 == 0
+    (upstream-RE commit f4197494). The added bits 17:16 == 0
     constraint must reject IDs that match the old (looser) mask but
     not the new (tighter) mask — e.g. an ID with bit 17 set."""
     proc = subprocess.run(
@@ -226,7 +226,7 @@ def test_bt_unlock_sequence_marker_fires_on_correlation(edge_pcap_dir):
     recent Pattern A on the same bus, the dissector fires a WARN-
     severity bt_unlock_sequence marker on the Pattern B frame in
     addition to the per-frame Pattern A and Pattern B markers. This
-    is the actually-interesting case per the rnet-firmware docs."""
+    is the actually-interesting case per the upstream-RE docs."""
     proc = subprocess.run(
         ["tshark", "-X", f"lua_script:{LUA}",
          "-r", str(edge_pcap_dir["bt_unlock_full_sequence"]), "-V"],
@@ -264,7 +264,7 @@ def test_programmer_presence_normal_dlc0(edge_pcap_dir):
     """STD 0x07A0 with DLC=0 is the normal Programmer-presence
     announcement and should NOT fire the Pattern B trigger marker
     (which requires DLC=8 + all-zero). Per the datasheet-verified
-    rnet-firmware update, 0x07A0 has dual semantics: DLC=0 is
+    upstream-RE update, 0x07A0 has dual semantics: DLC=0 is
     Programmer presence; DLC=8+all-zero is the unlock-protocol
     Pattern B trigger."""
     proc = subprocess.run(
@@ -356,7 +356,7 @@ def test_hv_clarity_rnet_unlock(edge_pcap_dir):
     assert cls.startswith("R-Net Unlock — service-mode enable"), (
         f"unexpected class: {cls!r}"
     )
-    # Target-clarification phrasing added per rnet-firmware
+    # Target-clarification phrasing added per upstream-RE
     # PARSE_HANDOFF_NOTES.md action #4 — class must distinguish this
     # dongle-issued unlock from BTMouse's separate Pattern A/B
     # internal-unlock protocol.
@@ -391,6 +391,12 @@ def test_hv_clarity_slotchanged(edge_pcap_dir):
     assert cls == "SlotChanged signal", cls
     assert "filekey=0x00010001" in summary, (
         f"summary must show decoded filekey: {summary!r}"
+    )
+    # Non-zero trailing metadata (bytes 4-7) must be surfaced raw, not
+    # dropped — the DLL ignores these bytes but the dissector shows them so
+    # a user sees the chair-side metadata that's on the wire.
+    assert "trailing=0A0B0000" in summary, (
+        f"summary must surface non-zero trailing metadata: {summary!r}"
     )
     assert conf == "Code"
     assert "CheckForSlotChanged" in src and "IsSlotChangedMsg" in src
