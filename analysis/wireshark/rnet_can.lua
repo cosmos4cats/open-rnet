@@ -854,6 +854,67 @@ local rb_error_names = {
     [36]="RB_INVALID_SYSTEM", [37]="RB_NO_CONNECTION", [38]="RB_INVALID_SIZE",
 }
 
+-- FN_ICON assignable-function names (the .rnd parameter DB enumerates every
+-- R-Net assignable function as FN_ICON_<N>, N=0..170; codes 0-127 are the
+-- 7-bit-keycode-addressable slice). These are a CANDIDATE keycode->function
+-- map under ONE of two live models, NOT a confirmed decode — see the 0x290
+-- handler. Used only to annotate 0x290 key events as a labelled hypothesis
+-- (rendered with "?"). Verbatim from the .rnd DB display strings.
+local fn_icon_names = {
+    [0]="Profile Up", [1]="Profile Down", [2]="Profile Mode", [3]="Profile 1",
+    [4]="Profile 2", [5]="Profile 3", [6]="Profile 4", [7]="Profile 5",
+    [8]="Profile 6", [9]="Profile 7", [10]="Profile 8", [11]="Mode Up",
+    [12]="Mode Down", [13]="Mode 1", [14]="Mode 2", [15]="Mode 3", [16]="Mode 4",
+    [17]="Mode 5", [18]="Mode 6", [19]="Mode 7", [20]="Mode 8", [21]="Speed Up",
+    [22]="Speed Down", [23]="Axis 1 Up", [24]="Axis 1 Down",
+    [25]="Axis 1 Toggle", [26]="Axis 2 Up", [27]="Axis 2 Down",
+    [28]="Axis 2 Toggle", [29]="Axis 3 Up", [30]="Axis 3 Down",
+    [31]="Axis 3 Toggle", [32]="Axis 4 Up", [33]="Axis 4 Down",
+    [34]="Axis 4 Toggle", [35]="Axis 5 Up", [36]="Axis 5 Down",
+    [37]="Axis 5 Toggle", [38]="Axis 6 Up", [39]="Axis 6 Down",
+    [40]="Axis 6 Toggle", [41]="Axis 7 Up", [42]="Axis 7 Down",
+    [43]="Axis 7 Toggle", [44]="Axis 8 Up", [45]="Axis 8 Down",
+    [46]="Axis 8 Toggle", [47]="Axis 9 Up", [48]="Axis 9 Down",
+    [49]="Axis 9 Toggle", [50]="Axis 10 Up", [51]="Axis 10 Down",
+    [52]="Axis 10 Toggle", [53]="Axis 11 Up", [54]="Axis 11 Down",
+    [55]="Axis 11 Toggle", [56]="Axis 12 Up", [57]="Axis 12 Down",
+    [58]="Axis 12 Toggle", [59]="Lights", [60]="Left Indicator",
+    [61]="Right Indicator", [62]="Hazards", [63]="Horn", [64]="Settings",
+    [65]="Left Mouse Button", [66]="Right Mouse Button", [67]="Scroll Up Mouse",
+    [68]="Scroll Down Mouse", [69]="Ir Shortcut 1", [70]="Ir Shortcut 2",
+    [71]="Ir Shortcut 3", [72]="Ir Shortcut 4", [73]="Ir Shortcut 5",
+    [74]="Ir Shortcut 6", [75]="Ir Shortcut 7", [76]="Ir Shortcut 8",
+    [77]="Axis 1 Up Latch", [78]="Axis 1 Down Latch", [79]="Axis 2 Up Latch",
+    [80]="Axis 2 Down Latch", [81]="Axis 3 Up Latch", [82]="Axis 3 Down Latch",
+    [83]="Axis 4 Up Latch", [84]="Axis 4 Down Latch", [85]="Axis 5 Up Latch",
+    [86]="Axis 5 Down Latch", [87]="Axis 6 Up Latch", [88]="Axis 6 Down Latch",
+    [89]="Axis 7 Up Latch", [90]="Axis 7 Down Latch", [91]="Axis 8 Up Latch",
+    [92]="Axis 8 Down Latch", [93]="Axis 9 Up Latch", [94]="Axis 9 Down Latch",
+    [95]="Axis 10 Up Latch", [96]="Axis 10 Down Latch", [97]="Axis 11 Up Latch",
+    [98]="Axis 11 Down Latch", [99]="Axis 12 Up Latch",
+    [100]="Axis 12 Down Latch", [101]="Odometer Reset",
+    [102]="Axis 1 Toggle Latch", [103]="Axis 2 Toggle Latch",
+    [104]="Axis 3 Toggle Latch", [105]="Axis 4 Toggle Latch",
+    [106]="Axis 5 Toggle Latch", [107]="Axis 6 Toggle Latch",
+    [108]="Axis 7 Toggle Latch", [109]="Axis 8 Toggle Latch",
+    [110]="Axis 9 Toggle Latch", [111]="Axis 10 Toggle Latch",
+    [112]="Axis 11 Toggle Latch", [113]="Axis 12 Toggle Latch",
+    [114]="Momentary Switch Mode 3 Output 1",
+    [115]="Momentary Switch Mode 3 Output 2",
+    [116]="Momentary Switch Mode 3 Output 3",
+    [117]="Momentary Switch Mode 3 Output 4",
+    [118]="Momentary Switch Mode 3 Output 5",
+    [119]="Momentary Switch Mode 3 Output 6",
+    [120]="Momentary Switch Mode 3 Output 7",
+    [121]="Momentary Switch Mode 4 Output 1",
+    [122]="Momentary Switch Mode 4 Output 2",
+    [123]="Momentary Switch Mode 4 Output 3",
+    [124]="Momentary Switch Mode 4 Output 4",
+    [125]="Momentary Switch Mode 4 Output 5",
+    [126]="Momentary Switch Mode 4 Output 6",
+    [127]="Momentary Switch Mode 4 Output 7",
+}
+
 local pwc_params = {}         -- 966 entries; populated near end of file
 
 
@@ -1926,20 +1987,39 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
             -- the USB SetCmdReadKeys block is the accumulated bitmap, not
             -- this per-event frame. JSM->dongle, dealer-service channel.
             --
-            -- No keycode->name table exists dealer-side (searched 2026-05-31,
-            -- confirmed negative): IRConfigurator carries only Omni-IR
-            -- appliance/menu codes; the Programmer EXE has chair-function
-            -- strings (Profile/Tilt/Actuator/...) but none bound to these
-            -- 0-127 codes; CKeyboard is a generic 128-bit button bitmap, so
-            -- the keycode->function map is keypad-layout-specific, not one
-            -- universal table. Rendering the raw code is by design, not an
-            -- omission.
+            -- The decode SHAPE (bit7=press, bits6:0=keycode=bit index) is
+            -- Code-confirmed; what the keycode NAMES is not. Candidate name
+            -- map (HYPOTHESIS): the .rnd parameter DB enumerates assignable
+            -- functions as FN_ICON_0..127 (Profile Up=0, Horn=63, Lights=59,
+            -- ...) — see fn_icon_names. Two live models decide whether that IS
+            -- the keycode namespace:
+            --   Model A  keycode == function code (FN_ICON) -> fn_icon_names is
+            --            the universal keycode->function map.
+            --   Model B  keycode == physical-input scan index -> only the ~9
+            --            fixed buttons (Profile/Mode/Speed+-/Horn/F/R/L/R) get a
+            --            static name; assignable controls (SoftKey1-4,
+            --            FifthButton, UserSwitch) carry config-assigned
+            --            functions, so no static map exists for them.
+            -- Dealer-side search (2026-05-31) found NO universal table
+            -- (IRConfigurator = Omni-IR only; Programmer EXE has function
+            -- strings but no keycode binding) — consistent with both models;
+            -- and the corpus has zero 0x290 frames, so the wire can't settle
+            -- it. A 3-press hardware test does: assign SoftKey1=Horn, press
+            -- (keycode K1); reassign SoftKey1=Lights, press (K2). K1==Horn's
+            -- code and K2==59 => Model A; K1==K2 != Horn's code => Model B.
+            -- Until confirmed, parse renders the FN_ICON name with a "?".
             local pressed = bit.band(d0, 0x80) ~= 0
             local key     = bit.band(d0, 0x7F)
-            t:add(pf.class, "Service: JSM key event (STD 0x290)")
+            local fn      = fn_icon_names[key]
+            t:add(pf.class, "Service: JSM key event (STD 0x290)" ..
+                (fn and string.format(" [%s?]", fn) or ""))
             t:add(pf.summary, string.format(
-                "Service key event (STD 0x290): key %d %s (data[0]=0x%02X)",
-                key, pressed and "pressed" or "released", d0))
+                "Service key event (STD 0x290): key %d %s%s (data[0]=0x%02X)",
+                key, pressed and "pressed" or "released",
+                fn and (" = '" .. fn .. "' [FN_ICON Model-A hypothesis, unconfirmed]") or "",
+                d0))
+            add_evidence(t, "Inferred",
+                "Key-function NAME is FN_ICON_" .. key .. " from the .rnd parameter DB under Model A (keycode==function code) — a HYPOTHESIS, not confirmed. Model B (keycode==physical scan index) would make only the ~9 fixed buttons statically nameable; a SoftKey-reassignment button-test settles A vs B (see comment). The decode shape (bit7=press, bits6:0=keycode) is Code-confirmed independently.")
         elseif cid == 0x305 then
             t:add(pf.class, "Service: input states (STD 0x305 / ProcessInput)")
             t:add(pf.summary, string.format(

@@ -512,7 +512,7 @@ them with their source citation.
 |------|------:|---------------|-------|
 | Code | 18 | Primary source — a vendor-binary decompile (`DongleInterface.dll`, the Programmer EXE, `IRConfigurator.exe`, LEDJSM/BTMouse firmware) cited as `Func @ 0xNNNN`, or a match against the wire itself (e.g. a known XOR table). | Authoritative — the vendor's own code. |
 | Documented | 36 | Community RE — open-rnet's decoders and specs (`rnet_utils.py`, `RNET_PROTOCOL_SPECIFICATION.md`, …) plus field dictionaries. Independently seen to work, but derivative; community RE (open-rnet included) has known errors. | Likely correct — verify if you depend on it. |
-| Inferred | 8 | No direct source — family-analogy from a documented neighbor, a structural guess from bit patterns, or a hackathon-only observation. | A hint, not a fact — never for safety-critical use. |
+| Inferred | 9 | No direct source — family-analogy from a documented neighbor, a structural guess from bit patterns, a hackathon-only observation, or a candidate mapping not yet hardware-confirmed (e.g. the `0x290` keycode→function names). | A hint, not a fact — never for safety-critical use. |
 
 Counts are per *rule*, not per frame — one `Code` rule may cover thousands of
 frames, one `Inferred` rule a handful. `Inferred` entries graduate to
