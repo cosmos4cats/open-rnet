@@ -1925,6 +1925,15 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
             -- 128-bit bitmap (SetKeyPress: bitmap[key>>3] ^= 1<<(key&7));
             -- the USB SetCmdReadKeys block is the accumulated bitmap, not
             -- this per-event frame. JSM->dongle, dealer-service channel.
+            --
+            -- No keycode->name table exists dealer-side (searched 2026-05-31,
+            -- confirmed negative): IRConfigurator carries only Omni-IR
+            -- appliance/menu codes; the Programmer EXE has chair-function
+            -- strings (Profile/Tilt/Actuator/...) but none bound to these
+            -- 0-127 codes; CKeyboard is a generic 128-bit button bitmap, so
+            -- the keycode->function map is keypad-layout-specific, not one
+            -- universal table. Rendering the raw code is by design, not an
+            -- omission.
             local pressed = bit.band(d0, 0x80) ~= 0
             local key     = bit.band(d0, 0x7F)
             t:add(pf.class, "Service: JSM key event (STD 0x290)")
