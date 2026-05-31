@@ -901,6 +901,31 @@ def test_pop_odi_8b_labeled_config_crc():
     )
 
 
+def test_pop_abort_reason_node_gated():
+    """A genuine Programmer-consumed POP abort is addressed to the Programmer
+    (OtherNode==0xF) and carries an RB_ERROR at data[4]. The OtherNode gate is
+    the WIRE discriminator: the DLL's IsAbortMsg is just std-ID+TC=3, which on
+    the wire over-matches a high-rate non-abort pattern (~5,700 0x791/PAGE0
+    frames addressed to node 2 in ics_write_config). So `rnet.pop.abort_reason`
+    must fire only on the node-0xF aborts (transfer ODIs, sensible codes), not
+    on every TC=3 frame."""
+    if not have_capture("programmer_write"):
+        pytest.skip("programmer_write capture not present")
+    rows = fields("programmer_write", "rnet.pop.abort_reason",
+                  ["rnet.pop.odi", "rnet.pop.abort_reason"])
+    assert rows, "no decoded abort reasons found"
+    assert all(r[1].startswith("RB_") or "RB_ERROR" in r[1] for r in rows), rows[:3]
+    if have_capture("ics_write_config"):
+        flagged = len(fields("ics_write_config", "rnet.pop.is_abort == true",
+                             ["frame.number"]))
+        reasoned = len(fields("ics_write_config", "rnet.pop.abort_reason",
+                              ["frame.number"]))
+        assert flagged > 1000 and reasoned < flagged // 10, (
+            f"abort-reason must be OtherNode-gated: {reasoned} reasons vs "
+            f"{flagged} TC=3 frames — the node-0xF gate regressed"
+        )
+
+
 def test_decode_rtc_broadcast_field_values():
     """0x1C2C0X00 is the chair's Real-Time Clock periodic broadcast
     (per DongleInterface.dll DecodeRTCBroadcast + Programmer EXE

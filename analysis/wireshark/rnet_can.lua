@@ -193,6 +193,7 @@ local pf = {
     pop_segment   = ProtoField.uint16("rnet.pop.segment",    "SegmentNumber (extended-ID POP)", base.DEC),
     pop_crc_value = ProtoField.uint16("rnet.pop.crc_value",  "Embedded CRC-16/CCITT-FALSE (LE u16 at bytes 4-5 of POP COMPLETE)", base.HEX),
     pop_is_abort  = ProtoField.bool  ("rnet.pop.is_abort",   "Is Abort message"),
+    pop_abort_reason = ProtoField.string("rnet.pop.abort_reason", "Abort reason (RB_ERROR, Programmer-directed)"),
     pop_is_last   = ProtoField.bool  ("rnet.pop.is_last",    "Is Last Segment"),
     pop_label     = ProtoField.string("rnet.pop.label",      "Legacy opcode label (if any)"),
     pop_msg_type  = ProtoField.string("rnet.pop.msg_type",   "POP_MSG_TYPE (read/write/reply/setup/abort)"),
@@ -829,6 +830,22 @@ local pop_register_undocumented = {
     [0x89] = true, [0x8A] = true,
 }
 
+-- RB_ERROR — repository/bus error taxonomy (IRConfigurator.exe C# enum,
+-- 39 codes 0-38). Carried in data[4] of a Programmer-directed POP abort
+-- frame (TC=3, OtherNode=0xF). See the abort decode in decode_pop_std.
+local rb_error_names = {
+    [0]="RB_NONE",      [1]="RB_COMMS",     [2]="RB_NO_REP",    [3]="RB_REP_TAKEN",
+    [4]="RB_ABORT",     [5]="RB_SEG_ERR",   [6]="RB_INV_NODE",  [7]="RB_INV_PARM",
+    [8]="RB_CANCELLED", [9]="RB_FILESLOT",  [10]="RB_FILEVER",  [11]="RB_SLOTWRITE",
+    [12]="RB_SLOTSIZE", [13]="RB_SLOTLOC",  [14]="RB_SIZE_BIG", [15]="RB_UNSUP_VER",
+    [16]="RB_UNKNOWN",  [17]="RB_SEG_REJ",  [18]="RB_SEG_SIZE", [19]="RB_CHKSUM",
+    [20]="RB_LASTSEG",  [21]="RB_CANMNGR",  [22]="RB_REPREF",   [23]="RB_REPREL",
+    [24]="RB_DNG_COMS", [25]="RB_CSM_BUSY", [26]="RB_ALLOC",    [27]="RB_REFCONF",
+    [28]="RB_DIFF_SIZE",[29]="RB_LOG_EMPTY",[30]="RB_NO_REPSRV",[31]="RB_TRNSFR_CD",
+    [32]="RB_TRNSFR_SZ",[33]="RB_SEG_BUSY", [34]="RB_FILETYP",  [35]="RB_PRODID",
+    [36]="RB_INVALID_SYSTEM", [37]="RB_NO_CONNECTION", [38]="RB_INVALID_SIZE",
+}
+
 local pwc_params = {}         -- 966 entries; populated near end of file
 
 
@@ -1253,6 +1270,26 @@ local function decode_pop_std(tvb, t, cid, pinfo)
         local is_abort = (tc == 3)
         t:add(pf.pop_is_abort, is_abort):set_generated()
 
+        -- Abort REASON. A genuine, Programmer-consumed abort is addressed to
+        -- the Programmer (node 0xF): OtherNode (data[0] low nibble) == 0xF,
+        -- data[4] = RB_ERROR over the aborted object's ODI (data[1..3]). The
+        -- OtherNode gate is the WIRE discriminator that separates real aborts
+        -- from the bulk of TC=3 traffic — the DLL's IsAbortMsg is only "std-ID
+        -- + TC=3", so direction/ODI correlation is what actually marks an abort
+        -- (the high-rate 0x791/ODI-0x80 frames addressed to node 2 are NOT
+        -- aborts; genuine ones ride transfer ODIs 0x81/0x8C/0xD1/0x210 with
+        -- codes RB_SEG_SIZE/RB_SEG_REJ/RB_TRNSFR_SZ). data[4] anchored:
+        -- GetAbortCode = u32 @ obj+0xC = data[4]. Full certainty needs
+        -- per-transfer correlation; OtherNode=0xF is the wire-validated signal.
+        local abort_str = ""
+        if is_abort and other == 0xF and tvb:len() >= 5 then
+            local rb = tvb(4,1):uint()
+            local rb_name = rb_error_names[rb]
+                or string.format("code %d (not a known RB_ERROR)", rb)
+            t:add(pf.pop_abort_reason, rb_name):set_generated()
+            abort_str = "  abort→Programmer: " .. rb_name
+        end
+
         local legacy = legacy_label(b0)
         if legacy then t:add(pf.pop_label, legacy):set_generated() end
 
@@ -1500,9 +1537,9 @@ local function decode_pop_std(tvb, t, cid, pinfo)
             end
         end
         t:add(pf.summary, string.format(
-            "POP %s→%s  %s%s%s%s%s",
+            "POP %s→%s  %s%s%s%s%s%s",
             slot_name(this_node), slot_name(other),
-            op, reg_str, text_str, extra_str, ver_str))
+            op, reg_str, text_str, extra_str, ver_str, abort_str))
     end
     add_evidence(t, "Code",
         "DongleInterface.dll CPOPMsg class (Ghidra); CAN-ID base (0x780/0x790) cross-validated 4-ways: DLL v5 + DLL v6 + DLR EXE + the BTMouse MC9S12X software CAN-ID match table (exact base address unsettled; RNET_PRIMARY_SOURCE_CROSS_VALIDATION.md)")
@@ -1859,9 +1896,17 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
                 "Service repository discovery (STD 0x080) state=0x%02X value=0x%02X",
                 d0, (tvb:len() >= 2) and tvb(1,1):uint() or 0))
         elseif cid == 0x290 then
-            t:add(pf.class, "Service: keyboard / KEYS (STD 0x290)")
+            -- data[0] = one key transition: bit 7 = pressed(1)/released(0),
+            -- bits 6:0 = key code (0-127). The dongle folds these into a
+            -- 128-bit bitmap (SetKeyPress: bitmap[key>>3] ^= 1<<(key&7));
+            -- the USB SetCmdReadKeys block is the accumulated bitmap, not
+            -- this per-event frame. JSM->dongle, dealer-service channel.
+            local pressed = bit.band(d0, 0x80) ~= 0
+            local key     = bit.band(d0, 0x7F)
+            t:add(pf.class, "Service: JSM key event (STD 0x290)")
             t:add(pf.summary, string.format(
-                "Service KEYS (STD 0x290) -> SetKeyPress(0x%02X)", d0))
+                "Service key event (STD 0x290): key %d %s (data[0]=0x%02X)",
+                key, pressed and "pressed" or "released", d0))
         elseif cid == 0x305 then
             t:add(pf.class, "Service: input states (STD 0x305 / ProcessInput)")
             t:add(pf.summary, string.format(
