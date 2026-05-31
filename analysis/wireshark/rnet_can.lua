@@ -824,10 +824,18 @@ local pop_register_names = {
     [0x8C] = "TEXT",
     [0x8F] = "DATA",
 }
--- POP register bytes seen empirically but not in §8.3.
-local pop_register_undocumented = {
-    [0x84] = true, [0x85] = true, [0x86] = true, [0x88] = true,
-    [0x89] = true, [0x8A] = true,
+-- File-slot accessor ODIs (repository node), per the DongleInterface.dll
+-- file-slot ODI table. These 0x8X bytes have NO §8.3 register meaning, so
+-- they're unambiguous when seen (unlike the context-dual 0x81/0x8C/0x8F,
+-- which are the §8.3 register model to a parameter module vs a file-slot
+-- accessor to the repository — destination==repository-node is the only
+-- discriminator, the repo being the node whose ODI-0x80 read replies
+-- success; parse leaves those on the §8.3 register model). 0x8B (Check =
+-- config CRC) is named in pop_register_names above.
+local pop_fileslot_accessors = {
+    [0x82] = "GetBufferSlot", [0x84] = "SlotWrite",   [0x85] = "Location",
+    [0x86] = "Size",          [0x88] = "FileType",    [0x89] = "FileVersion",
+    [0x8A] = "FileAttributes",
 }
 
 -- RB_ERROR — repository/bus error taxonomy (IRConfigurator.exe C# enum,
@@ -1409,8 +1417,8 @@ local function decode_pop_std(tvb, t, cid, pinfo)
                 if pop_register_names[reg] then
                     reg_name = pop_register_names[reg]
                     t:add(pf.pop_reg_name, reg_name):set_generated()
-                elseif pop_register_undocumented[reg] then
-                    reg_name = string.format("0x%02X (undocumented 0x8X register)", reg)
+                elseif pop_fileslot_accessors[reg] then
+                    reg_name = pop_fileslot_accessors[reg] .. " (file-slot accessor)"
                     t:add(pf.pop_reg_name, reg_name):set_generated()
                 end
             end
