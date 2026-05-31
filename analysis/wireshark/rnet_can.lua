@@ -2011,15 +2011,24 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
             local pressed = bit.band(d0, 0x80) ~= 0
             local key     = bit.band(d0, 0x7F)
             local fn      = fn_icon_names[key]
+            -- Codes >=77 are assignable-only functions (axis up/down/toggle
+            -- latch, momentary-switch outputs) — reachable only by config
+            -- assignment, never a dedicated button. Under Model B (keycode ==
+            -- physical scan index) no static keycode could name them AT ALL,
+            -- so this band carries a firmer caveat than the fixed band.
+            local assignable_only = key >= 77
+            local hedge = assignable_only
+                and "[FN_ICON Model-A only; assignable function — no static map under Model B]"
+                or  "[FN_ICON Model-A hypothesis, unconfirmed]"
             t:add(pf.class, "Service: JSM key event (STD 0x290)" ..
                 (fn and string.format(" [%s?]", fn) or ""))
             t:add(pf.summary, string.format(
                 "Service key event (STD 0x290): key %d %s%s (data[0]=0x%02X)",
                 key, pressed and "pressed" or "released",
-                fn and (" = '" .. fn .. "' [FN_ICON Model-A hypothesis, unconfirmed]") or "",
+                fn and (" = '" .. fn .. "' " .. hedge) or "",
                 d0))
             add_evidence(t, "Inferred",
-                "Key-function NAME is FN_ICON_" .. key .. " from the .rnd parameter DB under Model A (keycode==function code) — a HYPOTHESIS, not confirmed. Model B (keycode==physical scan index) would make only the ~9 fixed buttons statically nameable; a SoftKey-reassignment button-test settles A vs B (see comment). The decode shape (bit7=press, bits6:0=keycode) is Code-confirmed independently.")
+                "Key-function NAME is FN_ICON_" .. key .. " from the .rnd parameter DB under Model A (keycode==function code) — a HYPOTHESIS, not confirmed. Model B (keycode==physical scan index) would make only the ~9 fixed buttons statically nameable, and codes >=77 (assignable-only latch/momentary functions) unmappable under B by construction; a SoftKey-reassignment button-test settles A vs B (see comment). The decode shape (bit7=press, bits6:0=keycode) is Code-confirmed independently.")
         elseif cid == 0x305 then
             t:add(pf.class, "Service: input states (STD 0x305 / ProcessInput)")
             t:add(pf.summary, string.format(
