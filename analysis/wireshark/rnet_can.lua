@@ -1278,9 +1278,14 @@ local function decode_pop_std(tvb, t, cid, pinfo)
         -- + TC=3", so direction/ODI correlation is what actually marks an abort
         -- (the high-rate 0x791/ODI-0x80 frames addressed to node 2 are NOT
         -- aborts; genuine ones ride transfer ODIs 0x81/0x8C/0xD1/0x210 with
-        -- codes RB_SEG_SIZE/RB_SEG_REJ/RB_TRNSFR_SZ). data[4] anchored:
-        -- GetAbortCode = u32 @ obj+0xC = data[4]. Full certainty needs
-        -- per-transfer correlation; OtherNode=0xF is the wire-validated signal.
+        -- codes RB_SEG_SIZE/RB_SEG_REJ/RB_TRNSFR_SZ/RB_NO_CONNECTION). data[4]
+        -- anchored: GetAbortCode = u32 @ obj+0xC = data[4]. The OtherNode=0xF
+        -- + transfer-ODI signature is cross-confirmed against this corpus
+        -- (130 genuine aborts isolated, 5,667 PAGE0/node-2 frames excluded);
+        -- full certainty would need per-transfer correlation. NB: the value
+        -- here is the RAW WIRE code — e.g. 0x25 = RB_NO_CONNECTION(37). The
+        -- DLL's WriteGetFileSlot remaps 0x25 to RB_FILESLOT(9) for its own
+        -- getfileslot return, so the DLL return value ≠ the wire-code name.
         local abort_str = ""
         if is_abort and other == 0xF and tvb:len() >= 5 then
             local rb = tvb(4,1):uint()
