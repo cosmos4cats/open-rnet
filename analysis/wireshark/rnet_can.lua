@@ -54,7 +54,7 @@
 --       expected by construction.
 --     * Chair-module firmware (LEDJSM, BTMouse): each module carries a
 --       software CAN-ID match table that its dispatch handlers consult
---       (BTMouse @ FW 0x56E0-0x571B — upstream-RE BTMOUSE_POP_DISPATCH_
+--       (BTMouse @ FW 0x56E0-0x5717, 28 entries — upstream-RE BTMOUSE_POP_DISPATCH_
 --       PRIMARY_SOURCE.md §4; LEDJSM appears to carry a similar table near
 --       0x57C8, not yet fully catalogued). A frame ID absent from a module's table has no
 --       handler there. Each module also programs an MSCAN hardware
@@ -346,7 +346,7 @@ local pe = {
 
     -- Dormant chair-listened CAN ID. The set {0x001, 0x00A, 0x0F0,
     -- 0x7C0, 0x7E0, 0x7E4, 0x7E8, 0x7EC} appears in BTMouse's
-    -- literal CAN-ID table at FW 0x56E0-0x571B (LEDJSM appears to carry
+    -- literal CAN-ID table at FW 0x56E0-0x5717 (LEDJSM appears to carry
     -- a similar table near 0x57C8, not yet fully catalogued) — the chair has CAN-ID
     -- match-table / dispatch entries ready to react to
     -- these. But parse has ZERO corpus observations of any of them
@@ -1555,7 +1555,7 @@ local function decode_pop_std(tvb, t, cid, pinfo)
             op, reg_str, text_str, extra_str, ver_str, abort_str))
     end
     add_evidence(t, "Code",
-        "DongleInterface.dll CPOPMsg class (Ghidra); CAN-ID base (0x780/0x790) cross-validated 4-ways: DLL v5 + DLL v6 + DLR EXE + the BTMouse MC9S12X software CAN-ID match table (exact base address unsettled; RNET_PRIMARY_SOURCE_CROSS_VALIDATION.md)")
+        "DongleInterface.dll CPOPMsg class (Ghidra); CAN-ID base (0x780/0x790) cross-validated 4-ways: DLL v5 + DLL v6 + DLR EXE + the BTMouse MC9S12X software CAN-ID match table @ FW 0x56E0 (0x780/0x790 are byte-exact at offsets 0x56F4/0x56F6; RNET_PRIMARY_SOURCE_CROSS_VALIDATION.md)")
     return "POPstd"
 end
 
@@ -2005,17 +2005,19 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
             t:add(pf.class, string.format("Mode change family (fn 0x%X)", fn))
             t:add(pf.summary, string.format("Mode change family, function 0x%X (payload semantic chair-side, no dealer decoder)", fn))
             add_evidence(t, "Code",
-                "DongleInterface.dll IsModeChangeMsg @ 0x100015e0 (classifier only; no in-DLL callers, no DLR EXE refs); independently confirmed by BTMouse MC9S12X software CAN-ID match table entry 0x0060 @ FW 0x56F2 (BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §4)")
+                "DongleInterface.dll IsModeChangeMsg @ 0x100015e0 (classifier only; no in-DLL callers, no DLR EXE refs); independently confirmed by the BTMouse MC9S12X software CAN-ID match table @ FW 0x56E0, where 0x0060 is byte-exact at the 10th entry (offset 0x56F2) (BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §4)")
         end
         return "ModeChg"
     elseif cid >= 0x7B0 and cid <= 0x7BF then
         -- Config-mode family. 0x7B0/7B1/7B3 documented in rnet_utils.py.
         -- The whole 0x7B0-0x7BF range is now chair-side EVIDENCED: it
         -- appears in the BTMouse MC9S12X software CAN-ID match table
-        -- near firmware 0x56F2 (an interior slice of the 0x56E0 table;
-        -- ~18 entries, 16-bit BE words; low 12 bits = standard CAN ID, high
-        -- nibble = flag 0x0/0x4/0x8/0xC — exact base address and entry
-        -- count not yet settled). NB: this
+        -- (base FW 0x56E0, 28 two-byte entries → terminator 0x5716;
+        -- the 0x7Bx rows sit interior, around offset 0x56F2; 16-bit BE
+        -- words, low 12 bits = standard CAN ID, high nibble = flag
+        -- 0x0/0x4/0x8/0xC — base settled binary-verified 2026-05-31; the
+        -- old "~18 entries @ 0x56F2" counted from an interior offset).
+        -- NB: this
         -- is the dispatch-handlers' match table, NOT the MSCAN hardware
         -- acceptance filter (programmed separately @ 0x6046-0x6073; per
         -- BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §5 retraction 2026-05-29).
@@ -2031,14 +2033,14 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         t:add(pf.class, string.format("Config-mode family (fn 0x%X)", fn))
         t:add(pf.summary, string.format("Config-mode family, function 0x%X (BTMouse-listened; emitter unidentified)", fn))
         add_evidence(t, "Code",
-            "BTMouse MC9S12X software CAN-ID match table near FW 0x56F2 (interior slice of the 0x56E0 table; exact base address and entry count unsettled; BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §4; chair-side primary source)")
+            "BTMouse MC9S12X software CAN-ID match table @ FW 0x56E0, 28 entries (the 0x7Bx rows are interior, around offset 0x56F2; base settled binary-verified 2026-05-31; BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §4; chair-side primary source)")
         return "CfgFam"
     elseif cid == 0x001 or cid == 0x00A or cid == 0x0F0
         or cid == 0x7C0 or cid == 0x7E0 or cid == 0x7E4
         or cid == 0x7E8 or cid == 0x7EC then
         -- Dormant chair-listened CAN ID. See pe.dormant_chair_listened
         -- comment block. These IDs appear in BTMouse's literal CAN-ID
-        -- table at FW 0x56E0-0x571B (LEDJSM appears to carry a similar
+        -- table at FW 0x56E0-0x5717 (LEDJSM appears to carry a similar
         -- table near 0x57C8, not yet fully catalogued) but parse has zero corpus
         -- observations across all 30 captures. Fire an expert-info
         -- marker so anyone running the dissector against a capture
@@ -2051,7 +2053,7 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
             cid))
         class_item:add_proto_expert_info(pe.dormant_chair_listened)
         add_evidence(t, "Code",
-            "BTMouse MC9S12X literal CAN-ID table @ FW 0x56E0-0x571B (BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §4 + BTMOUSE_SEMANTIC_LAYER.md §2.6; LEDJSM carries a similar table near 0x57C8, not yet fully catalogued)")
+            "BTMouse MC9S12X literal CAN-ID table @ FW 0x56E0-0x5717, 28 entries (BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §4 + BTMOUSE_SEMANTIC_LAYER.md §2.6; LEDJSM carries a similar table near 0x57C8, not yet fully catalogued)")
         return "Dormant"
     elseif cid == 0x7FA then
         -- BTMouse-listened sentinel. Listed in the chair-firmware-
@@ -2450,7 +2452,7 @@ local function decode_xtd(tvb, t, cid, is_rtr, pinfo)
         -- as literal bytes. Two possibilities: (a) MSCAN-packed format
         -- in BTMouse firmware (bit-unpacking would find them), or
         -- (b) another chair module we don't have a dump for. The
-        -- BTMouse CAN-ID match table at FW 0x56F2-0x5716 does NOT list
+        -- BTMouse CAN-ID match table at FW 0x56E0-0x5716 does NOT list
         -- the 0x0A40 family, suggesting BTMouse doesn't receive these
         -- either. Sub-byte semantics (byte 2 = family selector,
         -- byte 3 = instance/sub-index; single-byte payload looks like
@@ -2629,7 +2631,7 @@ local function decode_xtd(tvb, t, cid, is_rtr, pinfo)
         -- *** TARGET CLARIFICATION (per upstream-RE PARSE_HANDOFF_NOTES.md
         -- action #4 + RNET_FAMILY_DECODE_GAPS.md Gap #1): ***
         -- This 0x08280F02 unlock is dongle→PM/SM-bound. BTMouse's
-        -- CAN-ID match table at FW 0x56F2 does NOT include 0x08280F02,
+        -- CAN-ID match table at FW 0x56E0 does NOT include 0x08280F02,
         -- so BTMouse is NOT the consumer of this unlock — it's
         -- targeted at the chair-controller (PM/SM firmware, not yet
         -- dumped). BTMouse has its own SEPARATE chair-side unlock-
@@ -2655,7 +2657,7 @@ local function decode_xtd(tvb, t, cid, is_rtr, pinfo)
               "Not crypto auth; CAN-ID IS the credential.")
         add_evidence(t, "Code",
                      "DongleInterface.dll v5 CRnetInterface::SendUnlock @ 0x10010340 (v6 @ 0x1000bcf0); "..
-                     "BTMouse negative finding: ID not in BTMouse CAN-ID match table @ FW 0x56F2 (RNET_FAMILY_DECODE_GAPS.md Gap #1)")
+                     "BTMouse negative finding: ID not in BTMouse CAN-ID match table @ FW 0x56E0 (RNET_FAMILY_DECODE_GAPS.md Gap #1)")
         return "Unlock"
     elseif bit.band(cid, 0xFFFFF0FF) == 0x08080000 then
         -- Device-presence beacon (std-equiv 0x202). Decoded by
