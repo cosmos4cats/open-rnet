@@ -2602,10 +2602,12 @@ local function decode_xtd(tvb, t, cid, is_rtr, pinfo)
         -- R-Net Unlock — service-mode enable. The CAN ID IS the
         -- credential: this exact 29-bit ID with DLC=0 is what
         -- CRnetInterface::SendUnlock transmits (DongleInterface.dll v5
-        -- @ 0x10010340, v6 @ 0x1000bcf0). The chair gates destructive
-        -- service-mode operations (parameter writes, fault clearing,
-        -- CServiceManager active lock at +0x7b) on having recently
-        -- received this frame.
+        -- @ 0x10010340, v6 @ 0x1000bcf0). VERIFIED is the send side only —
+        -- the DLL constructs + transmits this exact ID. What the chair DOES
+        -- on receipt is INFERRED, not traced: it presumably gates destructive
+        -- service-mode operations (parameter writes, fault clearing) on having
+        -- recently received this frame, but that enforcement lives in PM/SM
+        -- firmware (not dumped) — a hypothesis, not a confirmed chair behavior.
         --
         -- 29-bit ID bit-field per RNET_AUTH_PROTOCOL.md:
         --   priority=0x08, mode=0x28 (R-Net), service=0x0F (unlock),
@@ -2633,9 +2635,10 @@ local function decode_xtd(tvb, t, cid, is_rtr, pinfo)
         -- boundary against an attacker with bus access."
         t:add(pf.class, "R-Net Unlock — service-mode enable (dongle → PM/SM)")
         t:add(pf.summary,
-              "R-Net Unlock (DLC=0) — Programmer enables chair-side service mode "..
-              "(parameter writes, fault clearing). Target: chair-controller (PM/SM); "..
-              "BTMouse uses a separate unlock-magic protocol. "..
+              "R-Net Unlock (DLC=0) — the Programmer's signal to enable chair-side "..
+              "service mode (presumably gates parameter writes / fault clearing; "..
+              "enforcement unverified — PM/SM firmware undumped). Target: chair-"..
+              "controller (PM/SM); BTMouse uses a separate unlock-magic protocol. "..
               "Not crypto auth; CAN-ID IS the credential.")
         add_evidence(t, "Code",
                      "DongleInterface.dll v5 CRnetInterface::SendUnlock @ 0x10010340 (v6 @ 0x1000bcf0); "..

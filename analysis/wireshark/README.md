@@ -806,9 +806,11 @@ and friends, R-Net's chair-side access control has three pieces:
 1. **CAN-bus presence** = the primary credential. Anyone who can
    transmit on the bus can speak the protocol.
 2. **A single broadcast Unlock frame** — extended CAN ID `0x08280F02`,
-   DLC=0. The CAN-ID *is* the credential. The chair gates
-   destructive service-mode operations (parameter writes, fault
-   clearing) on having recently received this exact frame.
+   DLC=0. The CAN-ID *is* the credential. The chair is *presumed* to
+   gate destructive service-mode operations (parameter writes, fault
+   clearing) on having recently received this exact frame — but only
+   the *send* side is verified (`SendUnlock` in the DLL); the chair-side
+   enforcement lives in undumped PM/SM firmware, so it's inferred.
 3. **Repository ownership tokens** — one-byte tokens per chair-side
    repository, mediated via service-discovery messages. Cooperative
    ownership; chair enforces by broadcast contention, not crypto.
@@ -825,7 +827,7 @@ against an adversary with bus access.
 |---|---|---|
 | `Serial auth — response` (CAN ID `0x1F<seq><slot><key><val>`) | Per-device serial-byte broadcast in response to a JSM challenge. Each device emits its 4-byte DIME serial directly in the `val` field across `seq=0..3` (`val = serial[seq]`); the `key` field carries the network-wide XOR-table constant (`key = xor_table[seq]`), identical across every device on the network. | **Validated**: `✓ Table B` next to the label = `key[seq]` matches a known XOR table at that position. **Not validated**: no `✓` tag = the network's XOR table isn't one of our four known (A/B/C/D). The "validation" is just a network-identity match, not crypto — both sides know the table and the serial. |
 | `Serial auth — RTR challenge` (same CAN ID with RTR bit set) | The JSM asking each device "tell me byte N of your serial." | **In progress**: each challenge precedes the matching response by milliseconds. |
-| `R-Net Unlock — service-mode enable` (`0x08280F02`, DLC=0) | The Programmer flipping the chair into service mode. **The actual gate** for parameter writes / fault clearing chair-side. | **Successful** by emission: if the frame is on the wire, the chair's `CServiceManager` `+0x7b` "active" flag is presumed set. **No failure mode visible on wire** — the chair either accepts (silent) or ignores (also silent). |
+| `R-Net Unlock — service-mode enable` (`0x08280F02`, DLC=0) | The Programmer's signal to enable chair-side service mode (parameter writes / fault clearing). **Send side verified** (`SendUnlock`); the chair-side gate is **inferred** — enforcement lives in undumped PM/SM firmware. | **No on-wire confirmation either way** — only the dongle's emission is observable; whether the chair acts on it isn't visible on the bus (accept or ignore, both silent). |
 | `Transfer Complete sentinel` (`0x1E80000F`) and ReBus attach handshake (`0x1E84..87`) | R-Net session-layer state transitions (see "Protocol layering" above). | Distinct from "auth" — these are session-state transitions, not access-control events. |
 
 ### The two "auth"-shaped wire flows aren't the same thing
