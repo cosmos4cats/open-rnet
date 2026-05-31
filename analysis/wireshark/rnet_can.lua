@@ -54,9 +54,9 @@
 --       expected by construction.
 --     * Chair-module firmware (LEDJSM, BTMouse): each module carries a
 --       software CAN-ID match table that its dispatch handlers consult
---       (BTMouse @ FW 0x56E0-0x571B, LEDJSM @ FW 0x57C8+, cross-firmware
---       verified byte-exact — upstream-RE BTMOUSE_POP_DISPATCH_PRIMARY_
---       SOURCE.md §4). A frame ID absent from a module's table has no
+--       (BTMouse @ FW 0x56E0-0x571B — upstream-RE BTMOUSE_POP_DISPATCH_
+--       PRIMARY_SOURCE.md §4; LEDJSM appears to carry a similar table near
+--       0x57C8, not yet fully catalogued). A frame ID absent from a module's table has no
 --       handler there. Each module also programs an MSCAN hardware
 --       acceptance filter (CANIDAR0-7 / CANIDMR0-7) at boot, which can
 --       reject off-target frames before the CPU sees them — though the
@@ -345,8 +345,8 @@ local pe = {
 
     -- Dormant chair-listened CAN ID. The set {0x001, 0x00A, 0x0F0,
     -- 0x7C0, 0x7E0, 0x7E4, 0x7E8, 0x7EC} appears in BTMouse's
-    -- literal CAN-ID table at FW 0x56E0-0x571B (cross-validated in
-    -- LEDJSM HCS12 firmware at FW 0x57C8+) — the chair has CAN-ID
+    -- literal CAN-ID table at FW 0x56E0-0x571B (LEDJSM appears to carry
+    -- a similar table near 0x57C8, not yet fully catalogued) — the chair has CAN-ID
     -- match-table / dispatch entries ready to react to
     -- these. But parse has ZERO corpus observations of any of them
     -- across all 30 captures (cross-checked 2026-05-24). Per
@@ -1505,7 +1505,7 @@ local function decode_pop_std(tvb, t, cid, pinfo)
             op, reg_str, text_str, extra_str, ver_str))
     end
     add_evidence(t, "Code",
-        "DongleInterface.dll CPOPMsg class (Ghidra); CAN-ID base (0x780/0x790) cross-validated 4-ways: DLL v5 + DLL v6 + DLR EXE + BTMouse MC9S12X software CAN-ID match table @ FW 0x56F4/0x56F6 (RNET_PRIMARY_SOURCE_CROSS_VALIDATION.md)")
+        "DongleInterface.dll CPOPMsg class (Ghidra); CAN-ID base (0x780/0x790) cross-validated 4-ways: DLL v5 + DLL v6 + DLR EXE + the BTMouse MC9S12X software CAN-ID match table (exact base address unsettled; RNET_PRIMARY_SOURCE_CROSS_VALIDATION.md)")
     return "POPstd"
 end
 
@@ -1954,9 +1954,10 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         -- Config-mode family. 0x7B0/7B1/7B3 documented in rnet_utils.py.
         -- The whole 0x7B0-0x7BF range is now chair-side EVIDENCED: it
         -- appears in the BTMouse MC9S12X software CAN-ID match table
-        -- at firmware addresses 0x56F2-0x5718 (an interior slice of the
-        -- 0x56E0 table; 18 entries, 16-bit BE words; low 12 bits =
-        -- standard CAN ID, high nibble = flag 0x0/0x4/0x8/0xC). NB: this
+        -- near firmware 0x56F2 (an interior slice of the 0x56E0 table;
+        -- ~18 entries, 16-bit BE words; low 12 bits = standard CAN ID, high
+        -- nibble = flag 0x0/0x4/0x8/0xC — exact base address and entry
+        -- count not yet settled). NB: this
         -- is the dispatch-handlers' match table, NOT the MSCAN hardware
         -- acceptance filter (programmed separately @ 0x6046-0x6073; per
         -- BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §5 retraction 2026-05-29).
@@ -1972,15 +1973,15 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         t:add(pf.class, string.format("Config-mode family (fn 0x%X)", fn))
         t:add(pf.summary, string.format("Config-mode family, function 0x%X (BTMouse-listened; emitter unidentified)", fn))
         add_evidence(t, "Code",
-            "BTMouse MC9S12X software CAN-ID match table @ FW 0x56F2-0x5718 (interior slice of the 0x56E0 table; BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §4; chair-side primary source)")
+            "BTMouse MC9S12X software CAN-ID match table near FW 0x56F2 (interior slice of the 0x56E0 table; exact base address and entry count unsettled; BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §4; chair-side primary source)")
         return "CfgFam"
     elseif cid == 0x001 or cid == 0x00A or cid == 0x0F0
         or cid == 0x7C0 or cid == 0x7E0 or cid == 0x7E4
         or cid == 0x7E8 or cid == 0x7EC then
         -- Dormant chair-listened CAN ID. See pe.dormant_chair_listened
         -- comment block. These IDs appear in BTMouse's literal CAN-ID
-        -- table at FW 0x56E0-0x571B (with cross-firmware verification
-        -- against LEDJSM @ FW 0x57C8+) but parse has zero corpus
+        -- table at FW 0x56E0-0x571B (LEDJSM appears to carry a similar
+        -- table near 0x57C8, not yet fully catalogued) but parse has zero corpus
         -- observations across all 30 captures. Fire an expert-info
         -- marker so anyone running the dissector against a capture
         -- containing one of these IDs sees a loud "this is unusual,
@@ -1988,17 +1989,17 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         local class_item = t:add(pf.class, string.format(
             "Chair-listened (dormant) STD 0x%03X — first known wire observation!", cid))
         t:add(pf.summary, string.format(
-            "STD 0x%03X — BTMouse/LEDJSM have dispatch entries for this ID but parse's 30-capture corpus has zero prior observations. If you're seeing this, you've captured something interesting (likely factory/diagnostic or a service-tool trigger) — please share.",
+            "STD 0x%03X — BTMouse has a dispatch entry for this ID but parse's 30-capture corpus has zero prior observations. If you're seeing this, you've captured something interesting (likely factory/diagnostic or a service-tool trigger) — please share.",
             cid))
         class_item:add_proto_expert_info(pe.dormant_chair_listened)
         add_evidence(t, "Code",
-            "BTMouse MC9S12X literal CAN-ID table @ FW 0x56E0-0x571B + LEDJSM HCS12 FW 0x57C8+ (BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §4 + BTMOUSE_SEMANTIC_LAYER.md §2.6)")
+            "BTMouse MC9S12X literal CAN-ID table @ FW 0x56E0-0x571B (BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §4 + BTMOUSE_SEMANTIC_LAYER.md §2.6; LEDJSM carries a similar table near 0x57C8, not yet fully catalogued)")
         return "Dormant"
     elseif cid == 0x7FA then
         -- BTMouse-listened sentinel. Listed in the chair-firmware-
         -- family literal CAN-ID table at BTMouse FW 0x56E0 (entry 0,
-        -- value 0x07FA) AND at LEDJSM FW 0x57C8 (same byte sequence,
-        -- cross-firmware verified). Per BTMOUSE_POP_DISPATCH_
+        -- value 0x07FA); LEDJSM appears to carry a similar table near
+        -- 0x57C8, not yet fully catalogued. Per BTMOUSE_POP_DISPATCH_
         -- PRIMARY_SOURCE.md §4 (revised in a later RE pass),
         -- this table is 28 entries × 2 bytes with format
         -- {flag_nibble : 4 bits, CAN_ID : 12 bits} — every entry
@@ -2028,7 +2029,7 @@ local function decode_std(tvb, t, cid, is_rtr, pinfo)
         t:add(pf.class, "BTMouse sentinel (0x7FA)")
         t:add(pf.summary, "BTMouse-listened sentinel (chair-firmware-family-wide; emitter unidentified, semantic TBD)")
         add_evidence(t, "Code",
-            "BTMouse MC9S12X FW 0x56E0 entry 0 + LEDJSM HCS12 FW 0x57C8 (cross-firmware-verified literal CAN-ID table; BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §4)")
+            "BTMouse MC9S12X FW 0x56E0 entry 0 (literal CAN-ID table; LEDJSM appears to carry a similar table near 0x57C8, not yet fully catalogued; BTMOUSE_POP_DISPATCH_PRIMARY_SOURCE.md §4)")
         return "BTMSent"
     else
         t:add(pf.class, string.format("Unknown STD 0x%03X", cid))
