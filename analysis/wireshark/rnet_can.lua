@@ -1597,6 +1597,17 @@ end
 local function decode_pop_xtd(tvb, t, cid)
     local node    = bit.band(bit.rshift(cid, 18), 0xF)
     local tc      = bit.band(bit.rshift(cid, 16), 0x3)
+    -- Segment counter = low 16 bits of the extended CAN ID (in the
+    -- arbitration ID, NOT a data byte). Confirmed against DongleInterface.dll
+    -- CPOPMsg::SetSegmentNumber @0x10006fc0 (writes obj+4 as a u16) /
+    -- GetSegmentNumber @0x10006fb0, incremented once per emitted segment
+    -- (FUN_10011910); 16-bit, wraps at 0x10000 (never reached in practice).
+    -- Corpus: programmer_dump/write show seg = 1,2,3,… incrementing per
+    -- segment. The per-transfer CRC is NOT accumulated per-segment — it is
+    -- computed once over the fully reassembled buffer at completion
+    -- (CRC16_over_ByteArray) and rides only in the final TC=2 reply's
+    -- data[4..5] (decoded as rnet.pop.crc_value); per-segment frames carry
+    -- payload only.
     local seg     = bit.band(cid, 0xFFFF)
     local family  = _pop_xtd_family(cid)
     if family then
@@ -1618,7 +1629,7 @@ local function decode_pop_xtd(tvb, t, cid)
         add_evidence(t, "Code",
             "DongleInterface.dll CPOPMsg class (Ghidra) + family identification per upstream-RE RNET_TRANSFER_FAMILIES.md (Family A EVIDENCED via S11 + S10; Family B segment-base selector UNVERIFIED)")
     else
-        add_evidence(t, "Code", "DongleInterface.dll CPOPMsg class (Ghidra)")
+        add_evidence(t, "Code", "DongleInterface.dll CPOPMsg class (Ghidra); SegmentNumber = CAN-ID low-16 (SetSegmentNumber @0x10006fc0 / GetSegmentNumber @0x10006fb0); per-transfer CRC computed once over the reassembled buffer, only in the final TC=2 reply data[4..5]")
     end
     return "POPxtd"
 end
@@ -2239,6 +2250,18 @@ local function decode_xtd(tvb, t, cid, is_rtr, pinfo)
         -- broadcasting module's slot ID); 0x01 = Programmer→chair
         -- clock-SET (built by RTC_EncodeSetClockFrame; slot nibble
         -- unused). Same 7-field payload both ways.
+        --
+        -- NB (2026-05-31): DecodeRTCBroadcast is PERMISSIVE — it masks the
+        -- X-nibble and would render ANY 0x1C2C..00 as a date (6 fields, no
+        -- sub-second/tick; data[0] = whole seconds), so the decoder itself
+        -- cannot prove a given slot carries a clock. What proves it here is
+        -- the wire: the corpus carries only X=1-4, every frame an in-range
+        -- wall-clock date (the hackathon's X=1 decodes to 2026-05-21/Thu
+        -- across all six fields = the capture's real date — a counter can't
+        -- coincidentally produce the correct calendar date). A separately-
+        -- reported smooth LE-u16 ~1 Hz counter on this base is NOT
+        -- reproducible anywhere in the current 30-capture corpus, so parse
+        -- does not add a telemetry path for it.
         local is_set = (bit.band(cid, 0xFF) == 0x01)
         local fb = bit.band(bit.rshift(cid, 8), 0xF)
         if is_set then
@@ -2277,7 +2300,7 @@ local function decode_xtd(tvb, t, cid, is_rtr, pinfo)
                 dow_names[dow] or "?",
                 2000 + year, month, day, hour, min, sec))
         end
-        add_evidence(t, "Code", "DongleInterface.dll DecodeRTCBroadcast @ 0x1000f8e0 (masks the function nibble — every 0x1C2C slot is RTC) + Programmer EXE FUN_004a5030; field order (sec=data[0]/min=data[1]/hour=data[2]) binary-confirmed by the outbound encoder RTC_EncodeSetClockFrame @ 0x1000fa20 (maps COleDateTime Second/Minute/Hour; builds the 0x1C2C0001 clock-SET frame — set-vs-broadcast direction split); + wall-clock cross-check, corpus-validated 463/463 frames in-range across slots 0x01-0x04, 18 captures")
+        add_evidence(t, "Code", "DongleInterface.dll DecodeRTCBroadcast @ 0x1000f8e0 is PERMISSIVE: it masks the function nibble and renders any 0x1C2C..00 as 6 date/time fields (no sub-second/tick; data[0]=whole seconds), so it cannot itself distinguish a non-clock payload — 'every slot is RTC' is the DLL's view, not a wire discriminator. + Programmer EXE FUN_004a5030; field order (sec=data[0]/min=data[1]/hour=data[2]) binary-confirmed by the outbound encoder RTC_EncodeSetClockFrame @ 0x1000fa20 (maps COleDateTime Second/Minute/Hour; builds the 0x1C2C0001 clock-SET frame — set-vs-broadcast direction split). DISPOSITIVE that these are real clocks not counters: the hackathon's X=1 decodes to 2026-05-21/Thu across all six fields = the actual capture date; corpus observes only slots X=1-4, all in-range, 18 captures")
         return "RTC"
     elseif bit.band(cid, 0xFFFF00FF) == 0x181C0000 then
         -- 0x181C0X00 cJSM/JSM device-class family. Function byte = X.
